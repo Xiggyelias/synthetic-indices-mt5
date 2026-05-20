@@ -1,0 +1,41 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+venv/
+.venv/
+env/
+ENV/
+
+# Sensitive credentials & environment configuration
+.env
+.env.local
+.env.production
+.env.development
+.env.staging
+
+# Local bot state & trade history files (do not commit live states)
+data/trades_state.json
+data/performance_state.json
+data/trade_journal.json
+data/bot_switch.txt
+
+# Dynamic logs
+logs/
+*.log
+*.err
+timezone_setup.log
+dashboard_startup.log
+
+# IDE & OS files
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Scratch and temporary directories
+scratch/

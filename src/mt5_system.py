@@ -1,0 +1,1390 @@
+from __future__ import annotations
+
+import json
+import logging
+import os
+import signal
+import subprocess
+import sys
+import time
+from dataclasses import dataclass
+from datetime import datetime, timezone, timedelta
+from typing import Optional
+
+import pandas as pd
+try:
+    from dotenv import load_dotenv
+except Exception:  # pragma: no cover
+    load_dotenv = None
+
+from mt5_connection import MT5Connection
+from news_filter import NewsFilter, build_news_config_from_env
+from telegram_notifier import TelegramNotifier, build_telegram_config_from_env
+from trade_manager import ManagedTrade, TradeManager
+from trade_supervisor import TradeSupervisor
+from trading_bot_engulfing_v2 import EngulfingBotV2, Signal, TradingConfig
+from market_regime import MarketRegime, RegimeClassifier
+from performance_tracker import PerformanceTracker
+from trade_journal import TradeJournal
+
+# Session times in UTC (forex market sessions)
+LONDON_OPEN = 7   # 07:00 UTC
+LONDON_CLOSE = 16  # 16:00 UTC
+NY_OPEN = 12      # 12:00 UTC
+NY_CLOSE = 21     # 21:00 UTC
+
+
+@dataclass
+class SystemConfig:
+    symbols: list[str]
+    timeframe: str
+    poll_seconds: int
+    magic: int
+    state_path: str
+    avoid_news_minutes: int
+    
+    # NEW: Portfolio Management
+    max_correlated_trades: int = 1
+    correlation_map: dict = None # e.g. {"EURUSD": ["GBPUSD", "AUDUSD"]}
+    
+    config_json_path: str = "config/config_rsi_pullback.json"
+    bot_switch_path: str = "data/bot_switch.txt"
+
+
+def load_trading_config_from_json(path: str) -> TradingConfig:
+    cfg = TradingConfig()
+    if not path or not os.path.exists(path):
+        return cfg
+
+    with open(path, "r", encoding="utf-8") as f:
+        raw = json.load(f) or {}
+
+    rm = (raw.get("risk_management") or {})
+    sp = (raw.get("strategy_parameters") or {})
+    rsi = (sp.get("rsi_settings") or {})
+    vol = (sp.get("volume_settings") or {})
+    sr = (sp.get("support_resistance") or {})
+
+    if "risk_per_trade" in rm:
+        cfg.risk_per_trade = float(rm.get("risk_per_trade"))
+    if "min_risk_reward" in rm:
+        cfg.min_risk_reward = float(rm.get("min_risk_reward"))
+    if "max_drawdown" in rm:
+        cfg.max_drawdown = float(rm.get("max_drawdown"))
+    if "capital_allocation" in rm:
+        cfg.capital_allocation = float(rm.get("capital_allocation") or 0.0)
+    if "max_risk_per_trade" in rm:
+        cfg.max_risk_per_trade = float(rm.get("max_risk_per_trade") or cfg.max_risk_per_trade)
+    if "max_total_open_risk" in rm:
+        cfg.max_total_open_risk = float(rm.get("max_total_open_risk") or cfg.max_total_open_risk)
+    if "max_daily_loss" in rm:
+        cfg.max_daily_loss = float(rm.get("max_daily_loss") or cfg.max_daily_loss)
+    if "allow_partial_close" in rm:
+        cfg.allow_partial_close = bool(rm.get("allow_partial_close"))
+    if "initial_capital" in rm:
+        cfg.initial_capital = float(rm.get("initial_capital"))
+
+    if "capital_protection_enabled" in rm:
+        cfg.capital_protection_enabled = bool(rm.get("capital_protection_enabled"))
+    if "capital_protection_daily_loss_trigger" in rm:
+        cfg.cp_daily_loss_trigger = float(rm.get("capital_protection_daily_loss_trigger") or cfg.cp_daily_loss_trigger)
+    if "capital_protection_weekly_loss_trigger" in rm:
+        cfg.cp_weekly_loss_trigger = float(rm.get("capital_protection_weekly_loss_trigger") or cfg.cp_weekly_loss_trigger)
+    if "capital_protection_consecutive_losses_trigger" in rm:
+        cfg.cp_consecutive_losses_trigger = int(rm.get("capital_protection_consecutive_losses_trigger") or cfg.cp_consecutive_losses_trigger)
+    if "capital_protection_risk_fraction" in rm:
+        cfg.cp_risk_fraction = float(rm.get("capital_protection_risk_fraction") or cfg.cp_risk_fraction)
+    if "capital_protection_min_signal_score" in rm:
+        cfg.cp_min_signal_score = int(rm.get("capital_protection_min_signal_score") or cfg.cp_min_signal_score)
+    if "capital_protection_max_trades_per_day" in rm:
+        cfg.cp_max_trades_per_day = int(rm.get("capital_protection_max_trades_per_day") or cfg.cp_max_trades_per_day)
+    if "losing_streak_pause_after" in rm:
+        cfg.losing_streak_pause_after = int(rm.get("losing_streak_pause_after") or cfg.losing_streak_pause_after)
+    if "losing_streak_cooldown_seconds" in rm:
+        cfg.losing_streak_cooldown_seconds = float(rm.get("losing_streak_cooldown_seconds") or cfg.losing_streak_cooldown_seconds)
+    if "dynamic_risk_daily_dd_soft" in rm:
+        cfg.dynamic_risk_daily_dd_soft = float(rm.get("dynamic_risk_daily_dd_soft") or cfg.dynamic_risk_daily_dd_soft)
+    if "dynamic_risk_daily_dd_hard" in rm:
+        cfg.dynamic_risk_daily_dd_hard = float(rm.get("dynamic_risk_daily_dd_hard") or cfg.dynamic_risk_daily_dd_hard)
+    if "dynamic_risk_soft_multiplier" in rm:
+        cfg.dynamic_risk_soft_multiplier = float(rm.get("dynamic_risk_soft_multiplier") or cfg.dynamic_risk_soft_multiplier)
+    if "dynamic_risk_hard_multiplier" in rm:
+        cfg.dynamic_risk_hard_multiplier = float(rm.get("dynamic_risk_hard_multiplier") or cfg.dynamic_risk_hard_multiplier)
+    if "volatile_regime_risk_multiplier" in rm:
+        cfg.volatile_regime_risk_multiplier = float(rm.get("volatile_regime_risk_multiplier") or cfg.volatile_regime_risk_multiplier)
+
+    if "ema_fast" in sp:
+        cfg.ema_fast = int(sp.get("ema_fast"))
+    if "ema_slow" in sp:
+        cfg.ema_slow = int(sp.get("ema_slow"))
+    if "strategy_mode" in sp:
+        cfg.strategy_mode = str(sp.get("strategy_mode"))
+    if "skip_weak_range_entries" in sp:
+        cfg.skip_weak_range_entries = bool(sp.get("skip_weak_range_entries"))
+    if "min_trade_score_full_entry" in sp:
+        cfg.min_trade_score_full_entry = int(sp.get("min_trade_score_full_entry"))
+    if "min_trade_score_half_entry" in sp:
+        cfg.min_trade_score_half_entry = int(sp.get("min_trade_score_half_entry"))
+    if "min_planned_rr_execution" in sp:
+        cfg.min_planned_rr_execution = float(sp.get("min_planned_rr_execution"))
+
+    cfg.use_rsi_filter = bool(rsi.get("use_rsi_filter", cfg.use_rsi_filter))
+    cfg.rsi_period = int(rsi.get("rsi_period", cfg.rsi_period))
+    cfg.rsi_overbought = float(rsi.get("rsi_overbought", cfg.rsi_overbought))
+    cfg.rsi_oversold = float(rsi.get("rsi_oversold", cfg.rsi_oversold))
+    cfg.rsi_pullback_enabled = bool(rsi.get("rsi_pullback_enabled", cfg.rsi_pullback_enabled))
+    cfg.rsi_pullback_buy_threshold = float(rsi.get("rsi_pullback_buy_threshold", cfg.rsi_pullback_buy_threshold))
+    cfg.rsi_pullback_sell_threshold = float(rsi.get("rsi_pullback_sell_threshold", cfg.rsi_pullback_sell_threshold))
+    cfg.rsi_lookback_candles = int(rsi.get("rsi_lookback_candles", cfg.rsi_lookback_candles))
+
+    cfg.volume_multiplier = float(vol.get("volume_multiplier", cfg.volume_multiplier))
+    cfg.volume_period = int(vol.get("volume_period", cfg.volume_period))
+
+    cfg.sr_lookback = int(sr.get("sr_lookback", cfg.sr_lookback))
+    cfg.sr_tolerance = float(sr.get("sr_tolerance", cfg.sr_tolerance))
+
+    conf = (sp.get("confluence_settings") or {})
+    if "min_confluence_score" in conf:
+        cfg.min_confluence_score = int(conf.get("min_confluence_score"))
+    if "ema_trend" in conf:
+        cfg.ema_trend = int(conf.get("ema_trend"))
+    if "macd_fast" in conf:
+        cfg.macd_fast = int(conf.get("macd_fast"))
+    if "macd_slow" in conf:
+        cfg.macd_slow = int(conf.get("macd_slow"))
+    if "macd_signal" in conf:
+        cfg.macd_signal = int(conf.get("macd_signal"))
+    if "stoch_k" in conf:
+        cfg.stoch_k = int(conf.get("stoch_k"))
+    if "stoch_d" in conf:
+        cfg.stoch_d = int(conf.get("stoch_d"))
+    if "stoch_smooth" in conf:
+        cfg.stoch_smooth = int(conf.get("stoch_smooth"))
+
+    return cfg
+
+
+def compute_volume_from_risk(conn: MT5Connection, symbol: str, entry: float, sl: float, risk_fraction: float) -> Optional[float]:
+    rules = conn.get_broker_rules(symbol)
+    if rules is None:
+        return None
+
+    summary = conn.get_account_summary() or {}
+    balance = float(summary.get("balance") or 0.0)
+    if balance <= 0:
+        return None
+
+    risk_amount = balance * float(risk_fraction)
+    price_risk = abs(float(entry) - float(sl))
+    if price_risk <= 0:
+        return None
+
+    tick_size = float(getattr(rules, "tick_size", 0.0) or 0.0)
+    tick_value = float(getattr(rules, "tick_value", 0.0) or 0.0)
+    if tick_size <= 0 or tick_value <= 0:
+        return None
+
+    value_per_price_unit = tick_value / tick_size
+    risk_per_lot = price_risk * value_per_price_unit
+    if risk_per_lot <= 0:
+        return None
+
+    raw_vol = risk_amount / risk_per_lot
+    return conn.normalize_volume(symbol, raw_vol)
+
+
+class MT5BotSystem:
+    def __init__(self, conn: MT5Connection, system_cfg: SystemConfig) -> None:
+        self.conn = conn
+        self.system_cfg = system_cfg
+        self.logger = logging.getLogger("mt5-system")
+
+        self.trade_manager = TradeManager(system_cfg.state_path)
+        self.trade_manager.load()
+
+        self.notifier = TelegramNotifier(build_telegram_config_from_env(os.getenv))
+        self.notifier.set_status_provider(self._telegram_status_snapshot)
+        self.news = NewsFilter(build_news_config_from_env(os.getenv))
+        
+        self.strategy_cfg = load_trading_config_from_json(system_cfg.config_json_path)
+        self.supervisor = TradeSupervisor(
+            conn,
+            self.trade_manager,
+            magic=system_cfg.magic,
+            timeframe=system_cfg.timeframe,
+            notifier=self.notifier,
+            on_trade_closed=self._record_trade_result,
+            config=self.strategy_cfg,
+        )
+
+        self._losing_streak_limit = max(1, int(getattr(self.strategy_cfg, "losing_streak_pause_after", 5) or 5))
+        self.strategy = EngulfingBotV2(self.strategy_cfg)
+        self.regime_classifier = RegimeClassifier(atr_multiplier=2.0)
+        
+        # Performance tracking
+        self.performance = PerformanceTracker(state_path="data/performance_state.json")
+        self.journal = TradeJournal(journal_path="data/trade_journal.json")
+        self._last_weekly_report: str = ""  # ISO week string
+
+        self._notified_conn_lost = False
+        self._autotrading_last: Optional[bool] = None
+        self._bot_switch_last: Optional[bool] = None
+        self._news_block_last: str = ""
+        self._risk_halt_last: Optional[bool] = None
+        self._consecutive_losses: int = 0
+        self._losing_streak_paused: bool = False
+        self._losing_streak_limit: int = 5
+        self._last_heartbeat: float = 0
+        self._last_conn_check: float = time.time()
+        self._conn_fail_count: int = 0
+        self._last_performance_review_count: int = 0
+        self._setup_commands()
+
+    def _effective_balance(self, summary: dict) -> float:
+        bal = float(summary.get("balance") or 0.0)
+        cap = float(getattr(self.strategy_cfg, "capital_allocation", 0.0) or 0.0)
+        if cap > 0:
+            return float(min(bal, cap))
+        return bal
+
+    def _daily_loss_fraction(self, summary: Optional[dict] = None) -> float:
+        summary = summary or (self.conn.get_account_summary() or {})
+        eff = self._effective_balance(summary)
+        if eff <= 0:
+            return 0.0
+
+        meta = self.trade_manager.meta or {}
+        today = datetime.now(timezone.utc).date().isoformat()
+        if meta.get("daily_date") != today:
+            return 0.0
+
+        daily_start = float(meta.get("daily_start_eff") or 0.0)
+        if daily_start <= 0:
+            return 0.0
+        return max(0.0, (daily_start - eff) / daily_start)
+
+    def _bot_status_text(self) -> str:
+        status = self.conn.get_connection_status() or {}
+        if status.get("connected") is not True:
+            return "Disconnected"
+        if not self._is_autotrading_enabled():
+            return "Paused (AutoTrading OFF)"
+        if not self._is_bot_switch_enabled():
+            return "Paused (Bot switch OFF)"
+        if self.trade_manager.meta.get("halted"):
+            reason = str(self.trade_manager.meta.get("halt_reason") or "").strip()
+            return f"Risk Halted: {reason}" if reason else "Risk Halted"
+        return "Running"
+
+    def _telegram_status_snapshot(self) -> dict:
+        summary = self.conn.get_account_summary() or {}
+        return {
+            "daily_loss_pct": self._daily_loss_fraction(summary) * 100.0,
+            "open_trades": len(
+                [t for t in self.trade_manager.open_trades.values() if int(getattr(t, "magic", 0) or 0) == int(self.system_cfg.magic)]
+            ),
+            "bot_status": self._bot_status_text(),
+        }
+
+    def _risk_limits_gate(self) -> bool:
+        summary = self.conn.get_account_summary() or {}
+        eff = self._effective_balance(summary)
+        if eff <= 0:
+            return False
+
+        today = datetime.now(timezone.utc).date().isoformat()
+        meta = self.trade_manager.meta or {}
+
+        if meta.get("daily_date") != today:
+            meta["daily_date"] = today
+            meta["daily_start_eff"] = float(eff)
+
+        peak = float(meta.get("peak_eff") or 0.0)
+        if peak <= 0 or eff > peak:
+            peak = float(eff)
+            meta["peak_eff"] = float(peak)
+
+        daily_start = float(meta.get("daily_start_eff") or eff)
+        daily_loss = (daily_start - eff) / daily_start if daily_start > 0 else 0.0
+        drawdown = (peak - eff) / peak if peak > 0 else 0.0
+
+        max_daily_loss = float(getattr(self.strategy_cfg, "max_daily_loss", 0.02) or 0.02)
+        max_drawdown = float(getattr(self.strategy_cfg, "max_drawdown", 0.10) or 0.10)
+
+        halted = False
+        reason = ""
+        if daily_loss >= max_daily_loss:
+            halted = True
+            reason = f"Max daily loss breached: {daily_loss * 100:.2f}% >= {max_daily_loss * 100:.2f}%"
+        if drawdown >= max_drawdown:
+            halted = True
+            reason = f"Max drawdown breached: {drawdown * 100:.2f}% >= {max_drawdown * 100:.2f}%"
+
+        meta["halted"] = bool(halted)
+        meta["halt_reason"] = str(reason)
+        
+        # NEW: Update Weekly Start if not set or new week
+        now = datetime.now(timezone.utc)
+        if meta.get("weekly_date") != now.strftime("%Y-W%U"):
+            meta["weekly_date"] = now.strftime("%Y-W%U")
+            meta["weekly_start_eff"] = float(eff)
+            if meta.get("capital_protection_active"):
+                self.logger.info("New week: Deactivating Capital Protection Mode.")
+                meta["capital_protection_active"] = False
+                meta["cp_winning_streak"] = 0
+
+        self.trade_manager.meta = meta
+        self.trade_manager.save()
+
+        # Update CP State
+        self._update_capital_protection_state(summary)
+
+        if self._risk_halt_last is None or bool(halted) != bool(self._risk_halt_last):
+            if halted:
+                msg = f"RISK HALT: {reason}"
+                self.logger.warning(msg)
+            else:
+                msg = "RISK HALT CLEARED: limits OK"
+                self.logger.info(msg)
+            self.notifier.send(msg)
+            self._risk_halt_last = bool(halted)
+
+        return bool(halted)
+
+    def _update_capital_protection_state(self, summary: dict) -> bool:
+        meta = self.trade_manager.meta or {}
+        cfg = self.strategy_cfg
+
+        if not bool(getattr(cfg, "capital_protection_enabled", True)):
+            if meta.get("capital_protection_active"):
+                meta["capital_protection_active"] = False
+                self.trade_manager.meta = meta
+                self.trade_manager.save()
+            return False
+
+        daily_loss = self._daily_loss_fraction(summary)
+        weekly_start = float(meta.get("weekly_start_eff") or summary.get("balance", 0))
+        eff = self._effective_balance(summary)
+        weekly_loss = (weekly_start - eff) / weekly_start if weekly_start > 0 else 0
+        consecutive_losses = int(self._consecutive_losses)
+
+        d_thresh = float(getattr(cfg, "cp_daily_loss_trigger", 0.05) or 0.05)
+        w_thresh = float(getattr(cfg, "cp_weekly_loss_trigger", 0.12) or 0.12)
+        c_thresh = int(getattr(cfg, "cp_consecutive_losses_trigger", 5) or 5)
+
+        active = daily_loss >= d_thresh or weekly_loss >= w_thresh or consecutive_losses >= c_thresh
+
+        if active and not meta.get("capital_protection_active"):
+            cp_risk_pct = float(getattr(cfg, "cp_risk_fraction", 0.005) or 0.005) * 100.0
+            max_td = int(getattr(cfg, "cp_max_trades_per_day", 4) or 4)
+            min_sc = int(getattr(cfg, "cp_min_signal_score", 7) or 7)
+            msg = (
+                f"🛡️ CAPITAL PROTECTION MODE ACTIVATED!\n"
+                f"- Risk capped near {cp_risk_pct:.2f}% per trade\n"
+                f"- Setups score {min_sc}+ only\n"
+                f"- Max {max_td} trades/day"
+            )
+            self.logger.warning(msg)
+            self.notifier.send(msg)
+            meta["capital_protection_active"] = True
+            meta["cp_winning_streak"] = 0
+            meta["cp_daily_trades"] = 0
+
+        self.trade_manager.meta = meta
+        self.trade_manager.save()
+        return bool(meta.get("capital_protection_active", False))
+
+    def _open_risk_amount(self) -> float:
+        total = 0.0
+        for ticket, t in list(self.trade_manager.open_trades.items()):
+            if int(t.magic) != int(self.system_cfg.magic):
+                continue
+            try:
+                entry = float(t.entry_price or 0.0)
+                sl = float(t.stop_loss or 0.0)
+                vol = float(t.volume or 0.0)
+                if entry <= 0 or sl <= 0 or vol <= 0:
+                    continue
+                rules = self.conn.get_broker_rules(str(t.symbol))
+                if rules is None:
+                    continue
+                tick_size = float(getattr(rules, "tick_size", 0.0) or 0.0)
+                tick_value = float(getattr(rules, "tick_value", 0.0) or 0.0)
+                if tick_size <= 0 or tick_value <= 0:
+                    continue
+                value_per_price_unit = tick_value / tick_size
+                total += abs(entry - sl) * value_per_price_unit * vol
+            except Exception:
+                continue
+        return float(total)
+
+    def _is_autotrading_enabled(self) -> bool:
+        status = self.conn.get_connection_status() or {}
+        terminal_trade_allowed = status.get("trade_allowed")
+        if terminal_trade_allowed is not True:
+            return False
+
+        summary = self.conn.get_account_summary() or {}
+        account_trade_allowed = summary.get("trade_allowed")
+        if account_trade_allowed is False:
+            return False
+        return True
+
+    def _autotrading_gate(self) -> bool:
+        enabled = self._is_autotrading_enabled()
+        if self._autotrading_last is None or enabled != self._autotrading_last:
+            if enabled:
+                msg = "MT5 AutoTrading ON: bot actions resumed"
+                self.logger.info(msg)
+            else:
+                msg = "MT5 AutoTrading OFF: bot actions paused"
+                self.logger.warning(msg)
+            self.notifier.send(msg)
+            self._autotrading_last = enabled
+        return enabled
+
+    def _is_bot_switch_enabled(self) -> bool:
+        path = str(getattr(self.system_cfg, "bot_switch_path", "") or "")
+        if not path:
+            return True
+        try:
+            if not os.path.exists(path):
+                return True
+            with open(path, "r", encoding="utf-8") as f:
+                raw = (f.read() or "").strip().lower()
+            if raw in ("0", "off", "false", "no", "disabled", "pause", "paused"):
+                return False
+            if raw in ("1", "on", "true", "yes", "enabled", "run", "running", "resume", "resumed"):
+                return True
+            return True
+        except Exception:
+            return True
+
+    def _bot_switch_gate(self) -> bool:
+        enabled = self._is_bot_switch_enabled()
+        if self._bot_switch_last is None or enabled != self._bot_switch_last:
+            if enabled:
+                msg = "Bot switch ON: bot actions resumed"
+                self.logger.info(msg)
+            else:
+                msg = "Bot switch OFF: bot actions paused"
+                self.logger.warning(msg)
+            self.notifier.send(msg)
+            self._bot_switch_last = enabled
+        return enabled
+
+    def _rates_df(self, symbol: str, count: int = 400) -> Optional[pd.DataFrame]:
+        rates = self.conn.get_rates(symbol, timeframe=self.system_cfg.timeframe, count=count)
+        if rates is None:
+            return None
+        df = pd.DataFrame(rates)
+        if df.empty:
+            return None
+        df["time"] = pd.to_datetime(df["time"], unit="s")
+        if "tick_volume" in df.columns and "volume" not in df.columns:
+            df["volume"] = df["tick_volume"]
+        df = df.set_index("time")
+        return df
+
+    def _connection_guard(self) -> bool:
+        ok = self.conn.ensure_connected()
+        status = self.conn.get_connection_status()
+        if ok and status.get("connected") is True:
+            if self._notified_conn_lost:
+                self.notifier.send("MT5 connection restored")
+            self._notified_conn_lost = False
+            return True
+
+        if not self._notified_conn_lost:
+            self.notifier.send("MT5 connection lost")
+            self._notified_conn_lost = True
+        return False
+
+    def _has_open_position(self, symbol: str) -> bool:
+        positions = self.conn.get_positions(symbol)
+        if positions is None:
+            return False
+        return len(list(positions)) > 0
+
+    def _resolve_position_ticket(
+        self,
+        symbol: str,
+        direction: str,
+        volume: float,
+        magic: int,
+    ) -> int:
+        positions = self.conn.get_positions(symbol)
+        if positions is None:
+            return 0
+
+        desired_type = 0 if str(direction).lower() == "buy" else 1
+        candidates = []
+        for p in positions:
+            try:
+                if int(getattr(p, "magic", 0) or 0) != int(magic):
+                    continue
+                if int(getattr(p, "type", -1) or -1) != int(desired_type):
+                    continue
+                pvol = float(getattr(p, "volume", 0.0) or 0.0)
+                if abs(pvol - float(volume)) > 1e-9:
+                    continue
+                candidates.append(p)
+            except Exception:
+                continue
+
+        if not candidates:
+            return 0
+
+        def sort_key(p) -> int:
+            return int(getattr(p, "time_update_msc", 0) or getattr(p, "time_msc", 0) or getattr(p, "time", 0) or 0)
+
+        pos = sorted(candidates, key=sort_key, reverse=True)[0]
+        return int(getattr(pos, "ticket", 0) or getattr(pos, "identifier", 0) or 0)
+
+    def _place_trade(self, symbol: str, direction: str, entry: float, sl: float, tp: float, volume: float, confluence_score: int = 0, confluence_details: dict = None, score: int = 0, regime: str = "") -> None:
+        result = self.conn.send_market_order(
+            symbol=symbol,
+            direction=direction,
+            volume=float(volume),
+            stop_loss=float(sl),
+            take_profit=float(tp),
+            deviation=int(getattr(self.strategy_cfg, "max_slippage_points", 10) or 10),
+            magic=int(self.system_cfg.magic),
+            comment=f"score{score}@{datetime.now(timezone.utc).isoformat()}",
+        )
+        if result is None:
+            self.notifier.send(f"Order failed: {symbol} {direction.upper()} vol={volume}")
+            return
+
+        ticket = self._resolve_position_ticket(
+            symbol=symbol,
+            direction=direction,
+            volume=float(volume),
+            magic=int(self.system_cfg.magic),
+        )
+        if ticket <= 0:
+            ticket = int(getattr(result, "order", 0) or 0)
+
+        # Build confluence signal summary for Telegram
+        session = self._session_name()
+        conf_lines = ""
+        if confluence_details:
+            conf_lines = " | ".join(f"{'✅' if v else '❌'}{k}" for k, v in confluence_details.items())
+
+        self.notifier.send_trade_execution({
+            "direction": direction.upper(),
+            "entry_price": str(entry),
+            "stop_loss": str(sl),
+            "take_profit": str(tp),
+            "risk_reward": str(round(abs(tp - entry) / abs(entry - sl), 1)) if abs(entry - sl) > 0 else "N/A",
+            "volume_multiplier": str(volume),
+            "rsi_value": "N/A",
+            "rsi_pullback": "N/A",
+            "sr_tolerance": str(self.strategy_cfg.sr_tolerance),
+            "daily_loss_pct": f"{self._daily_loss_fraction() * 100:.1f}",
+            "open_trades": str(len([t for t in self.trade_manager.open_trades.values() if int(getattr(t, 'magic', 0) or 0) == int(self.system_cfg.magic)]) + 1),
+            "news_pause_status": "Active",
+            "slippage_pips": "0.0",
+            "spread_points": "0",
+            "trades_completed": str(len(self.trade_manager.closed_trades)),
+            "confluence_score": str(confluence_score),
+            "trade_score": str(score),
+            "confluence_signals": conf_lines,
+            "session": session,
+            "regime": regime,
+        })
+
+        mt = ManagedTrade(
+            ticket=ticket,
+            symbol=symbol,
+            direction=direction,
+            volume=float(volume),
+            entry_price=float(entry),
+            stop_loss=float(sl),
+            take_profit=float(tp),
+            magic=int(self.system_cfg.magic),
+            comment=str(getattr(result, "comment", "") or ""),
+            opened_at=datetime.now(timezone.utc).isoformat(),
+            moved_to_break_even=False,
+            last_known_sl=float(sl),
+            last_known_tp=float(tp),
+            score=score,
+            regime=regime,
+            planned_rr=abs(tp - entry) / abs(entry - sl) if abs(entry - sl) > 0 else 0,
+            confluence_signals=conf_lines,
+            confluence_score=confluence_score,
+            session=session,
+        )
+        self.trade_manager.upsert(mt)
+        
+        # Track CP daily trades
+        meta = self.trade_manager.meta or {}
+        if meta.get("capital_protection_active"):
+            meta["cp_daily_trades"] = meta.get("cp_daily_trades", 0) + 1
+            self.trade_manager.meta = meta
+            self.trade_manager.save()
+
+    def _is_high_liquidity_session(self) -> bool:
+        """Check if current time is within London or NY session (UTC)."""
+        now_utc = datetime.now(timezone.utc)
+        hour = now_utc.hour
+        in_london = LONDON_OPEN <= hour < LONDON_CLOSE
+        in_ny = NY_OPEN <= hour < NY_CLOSE
+        return in_london or in_ny
+
+    def _session_name(self) -> str:
+        """Return current session name for logging."""
+        now_utc = datetime.now(timezone.utc)
+        hour = now_utc.hour
+        in_london = LONDON_OPEN <= hour < LONDON_CLOSE
+        in_ny = NY_OPEN <= hour < NY_CLOSE
+        if in_london and in_ny:
+            return "London+NY Overlap"
+        if in_london:
+            return "London"
+        if in_ny:
+            return "New York"
+        return "Off-Session"
+
+    def _check_losing_streak(self) -> bool:
+        """Check if we should pause due to consecutive losses. Returns True if paused."""
+        if self._losing_streak_paused:
+            # Auto-resume after a new candle cycle (check every poll)
+            # Only resume if at least 1 hour has passed since pause
+            meta = self.trade_manager.meta or {}
+            paused_at = meta.get("losing_streak_paused_at")
+            if paused_at:
+                try:
+                    paused_dt = datetime.fromisoformat(paused_at)
+                    elapsed = (datetime.now(timezone.utc) - paused_dt).total_seconds()
+                    cooldown = float(getattr(self.strategy_cfg, "losing_streak_cooldown_seconds", 3600.0) or 3600.0)
+                    if elapsed >= cooldown:
+                        self._losing_streak_paused = False
+                        self._consecutive_losses = 0
+                        meta["losing_streak_paused_at"] = None
+                        self.trade_manager.meta = meta
+                        self.trade_manager.save()
+                        msg = "Losing streak pause lifted after cooldown. Resuming trading."
+                        self.logger.info(msg)
+                        self.notifier.send(msg)
+                except Exception:
+                    pass
+            return self._losing_streak_paused
+        return False
+
+    def _is_london_ny_session(self) -> bool:
+        """Check if current time is within London or NY session (UTC)."""
+        now_utc = datetime.now(timezone.utc)
+        hour = now_utc.hour
+        # London: 7:00 - 16:00 UTC, NY: 12:00 - 21:00 UTC
+        # Covering the combined range 7:00 - 21:00 UTC
+        return 7 <= hour < 21
+
+    def _record_trade_result(self, win: bool, trade_data: dict = None) -> None:
+        """Record trade result for losing streak tracking and performance metrics."""
+        meta = self.trade_manager.meta or {}
+        if win:
+            self._consecutive_losses = 0
+            self._losing_streak_paused = False
+            if meta.get("capital_protection_active"):
+                meta["cp_winning_streak"] = meta.get("cp_winning_streak", 0) + 1
+        else:
+            self._consecutive_losses += 1
+            if meta.get("capital_protection_active"):
+                meta["cp_winning_streak"] = 0
+                # Mandatory 1-hour break after each loss in CP mode
+                meta["cp_pause_until"] = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+
+            if self._consecutive_losses >= self._losing_streak_limit:
+                self._losing_streak_paused = True
+                meta["losing_streak_paused_at"] = datetime.now(timezone.utc).isoformat()
+                msg = f"LOSING STREAK PAUSE: {self._consecutive_losses} consecutive losses. Pausing for review (1h cooldown)."
+                self.logger.warning(msg)
+                self.notifier.send(msg)
+        
+        self.trade_manager.meta = meta
+        self.trade_manager.save()
+        
+        # Record in performance tracker
+        if trade_data:
+            try:
+                self.performance.record_trade(
+                    ticket=trade_data.get("ticket", 0),
+                    symbol=trade_data.get("symbol", ""),
+                    direction=trade_data.get("direction", ""),
+                    entry_price=trade_data.get("entry_price", 0.0),
+                    exit_price=trade_data.get("exit_price", 0.0),
+                    volume=trade_data.get("volume", 0.0),
+                    pnl=trade_data.get("pnl", 0.0),
+                    r_achieved=trade_data.get("r_achieved", 0.0),
+                    confluence_score=trade_data.get("confluence_score", 0),
+                    session=trade_data.get("session", "Unknown"),
+                    opened_at=trade_data.get("opened_at", ""),
+                    closed_at=trade_data.get("closed_at", ""),
+                    commission=trade_data.get("commission", 0.0),
+                    swap=trade_data.get("swap", 0.0),
+                    confluence_signals=trade_data.get("confluence_signals", {}),
+                )
+            except Exception as e:
+                self.logger.warning("Failed to record trade in performance tracker: %s", e)
+            
+            # Add journal entry
+            try:
+                entry = self.journal.add_entry(
+                    ticket=trade_data.get("ticket", 0),
+                    symbol=trade_data.get("symbol", ""),
+                    direction=trade_data.get("direction", ""),
+                    entry_price=trade_data.get("entry_price", 0.0),
+                    exit_price=trade_data.get("exit_price", 0.0),
+                    volume=trade_data.get("volume", 0.0),
+                    opened_at=trade_data.get("opened_at", ""),
+                    closed_at=trade_data.get("closed_at", ""),
+                    pnl=trade_data.get("pnl", 0.0),
+                    r_achieved=trade_data.get("r_achieved", 0.0),
+                    confluence_score=trade_data.get("confluence_score", 0),
+                    confluence_signals=trade_data.get("confluence_signals", {}),
+                    session=trade_data.get("session", "Unknown"),
+                    regime=trade_data.get("regime", "Unknown"),
+                    setup_type=trade_data.get("setup_type", ""),
+                    initial_sl=trade_data.get("initial_sl", 0.0),
+                    initial_tp=trade_data.get("initial_tp", 0.0),
+                    planned_rr=trade_data.get("planned_rr", 0.0),
+                    moved_to_be=trade_data.get("moved_to_be", False),
+                    partial_closed=trade_data.get("partial_closed", False),
+                    commission=trade_data.get("commission", 0.0),
+                    swap=trade_data.get("swap", 0.0),
+                )
+                # Send journal summary to Telegram
+                summary = self.journal.format_entry_summary(entry)
+                self.notifier.send(summary)
+            except Exception as e:
+                self.logger.warning("Failed to add journal entry: %s", e)
+        
+        # Check for weekly report
+        self._maybe_send_weekly_report()
+        
+        # Run Performance Review every 20 trades
+        total_closed = len(self.trade_manager.closed_trades)
+        if total_closed > 0 and total_closed % 20 == 0 and total_closed != self._last_performance_review_count:
+            self._last_performance_review_count = total_closed
+            self._run_performance_review()
+
+    def _maybe_send_weekly_report(self) -> None:
+        """Send weekly performance report on Sunday at 20:00 UTC."""
+        now = datetime.now(timezone.utc)
+        current_week = now.strftime("%Y-W%U")
+        
+        # Check if we already sent this week's report
+        if self._last_weekly_report == current_week:
+            return
+        
+        # Send on Sunday at 20:00 UTC (end of trading week)
+        if now.weekday() == 6 and now.hour == 20:
+            self._last_weekly_report = current_week
+            try:
+                metrics = self.performance.calculate_metrics(period_days=7)
+                report = self.performance.format_weekly_report(metrics)
+                self.notifier.send(report)
+                self.logger.info("Sent weekly performance report")
+            except Exception as e:
+                self.logger.warning("Failed to send weekly report: %s", e)
+
+    def _run_performance_review(self):
+        closed = self.trade_manager.closed_trades
+        if len(closed) < 20:
+            return
+        last_20 = closed[-20:]
+        wins = [t for t in last_20 if float(t.get('profit_loss', 0)) > 0]
+        win_rate = len(wins) / 20
+        
+        msg = f"📊 PERFORMANCE REVIEW (Last 20 Trades)\nWin Rate: {win_rate*100:.1f}%\n"
+        if win_rate < 0.45:
+            msg += "⚠️ Win rate below 45%! Consider tightening entry confluence."
+        self.notifier.send(msg)
+
+    def evaluate_and_trade(self, symbol: str) -> None:
+        # Friday Close Logic
+        if self.strategy_cfg.friday_close_enabled:
+            now_utc = datetime.now(timezone.utc)
+            if now_utc.weekday() == 4 and now_utc.hour >= self.strategy_cfg.friday_close_hour_utc:
+                if self._has_open_position(symbol):
+                    self.logger.warning("Friday Close active: closing all positions for %s", symbol)
+                    self.notifier.send(f"⚠️ Friday Close active: closing all positions for {symbol} to avoid weekend gap risk.")
+                    self.conn.close_all_positions(symbol)
+                return
+
+        df = self._rates_df(symbol)
+        if df is None or len(df) < 250:
+            return
+        df = self.strategy.calculate_indicators(df)
+
+        idx = len(df) - 2
+        
+        # HTF Trend Check (D1) — gate early, before any heavy computation
+        htf_trend_aligned = True
+        mtf_df = self.conn.get_rates(symbol, "D1", count=100)
+        if mtf_df is not None:
+            mtf_df = pd.DataFrame(mtf_df)
+            is_bullish_signal = self.strategy.is_bullish_engulfing(df, idx)
+            htf_trend_aligned = self.strategy.check_mtf_trend(mtf_df, Signal.BUY if is_bullish_signal else Signal.SELL)
+
+        if not htf_trend_aligned:
+            return  # fast-exit: no point running regime + signal if D1 disagrees
+
+        # Macro Context & Session Checks
+        is_london_ny = self._is_london_ny_session()
+
+        # News filter — cache result (single network call; used for both regime + news gate)
+        self.news.config.avoid_minutes = 120
+        news_blocked, news_reason = self.news.is_blocked(symbol)
+
+        # MARKET REGIME CLASSIFICATION
+        regime = self.regime_classifier.classify(df, news_blocked)
+        self.logger.info("Market Regime for %s: %s", symbol, regime.value)
+        
+        if bool(getattr(self.strategy_cfg, "skip_weak_range_entries", False)) and regime == MarketRegime.RANGING:
+            self.logger.debug("Skipping %s: ranging chop filter enabled", symbol)
+            return
+        
+        # Capital Protection Mode Checks
+        meta = self.trade_manager.meta or {}
+        is_cp_active = bool(meta.get("capital_protection_active", False))
+        if is_cp_active:
+            cp_max_day = int(getattr(self.strategy_cfg, "cp_max_trades_per_day", 4) or 4)
+            if meta.get("cp_daily_trades", 0) >= cp_max_day:
+                return
+            # Break after loss
+            pause_until = meta.get("cp_pause_until")
+            if pause_until and datetime.now(timezone.utc) < datetime.fromisoformat(pause_until):
+                return
+
+        sig, score, risk_mult = self.strategy.generate_signal(
+            df, idx, regime=regime, is_london_ny=is_london_ny, htf_trend_aligned=htf_trend_aligned
+        )
+
+        if sig not in (Signal.BUY, Signal.SELL):
+            return
+            
+        # 2. Meaningful level? (Handled by scoring/strategy)
+        
+        # 3. Confluence — must meet configured minimum (aligned with strategy.generate_signal)
+        conf_score, conf_details = self.strategy.confluence_score(df, idx, sig, regime=regime)
+        min_conf = int(getattr(self.strategy_cfg, "min_confluence_score", 3) or 3)
+        if conf_score < min_conf:
+            self.logger.info("Signal blocked: Confluence score %d < %d", conf_score, min_conf)
+            return
+            
+        # 4. Planned R:R execution floor
+        sl, tp = self.strategy.calculate_stop_take_profit(df, idx, sig, regime=regime)
+        entry = df.iloc[idx]['close']
+        planned_rr = abs(tp - entry) / abs(entry - sl) if abs(entry - sl) > 0 else 0
+        min_rr_ex = float(getattr(self.strategy_cfg, "min_planned_rr_execution", 0.3) or 0.3)
+        if min_rr_ex > 0 and planned_rr < min_rr_ex:
+            self.logger.info("Signal blocked: Planned R:R %.2f < %.2f", planned_rr, min_rr_ex)
+            return
+
+        cp_min_score = int(getattr(self.strategy_cfg, "cp_min_signal_score", 7) or 7)
+        if is_cp_active and score < cp_min_score:
+            self.logger.info("Signal score %d blocked by Capital Protection (min %d)", score, cp_min_score)
+            return
+
+        if self._has_open_position(symbol):
+            return
+
+        # Session filter: only trade during high-liquidity sessions
+        if not self._is_high_liquidity_session():
+            return
+
+        # Losing streak pause
+        if self._check_losing_streak():
+            return
+
+        if regime == MarketRegime.NEWS_MODE:
+            key = f"{symbol}:NEWS_MODE"
+            if key != self._news_block_last:
+                self.logger.info("News filter blocked %s: %s", symbol, news_reason)
+                self.notifier.send(f"⚠️ NEWS MODE Detected! Standing aside on {symbol}.\nReason: {news_reason}")
+                self._news_block_last = key
+            return
+
+        if self._news_block_last.startswith(f"{symbol}:"):
+            self._news_block_last = ""
+
+        # Risk adjustment for VOLATILE
+        risk_multiplier = 1.0
+        if regime == MarketRegime.VOLATILE:
+            vol_mult = float(getattr(self.strategy_cfg, "volatile_regime_risk_multiplier", 0.78) or 0.78)
+            self.logger.warning(
+                "VOLATILE Market Detected on %s! Reducing size to %.0f%% of base; widening stops.",
+                symbol,
+                vol_mult * 100.0,
+            )
+            risk_multiplier = vol_mult
+        
+        tick = self.conn.get_symbol_price(symbol)
+        if tick is None:
+            return
+        rules = self.conn.get_broker_rules(symbol)
+        if rules is None:
+            return
+
+        spread_points = 0.0
+        spread_price  = 0.0
+        try:
+            if float(rules.point) > 0:
+                spread_points = (float(tick.ask) - float(tick.bid)) / float(rules.point)
+                spread_price  = float(tick.ask) - float(tick.bid)
+        except Exception:
+            spread_points = 0.0
+
+        # Fixed-point spread gate (optional, config-driven; 0 = disabled)
+        max_spread = float(getattr(self.strategy_cfg, "max_spread_points", 0) or 0)
+        if max_spread > 0 and spread_points > max_spread:
+            self.logger.info("Spread too high for %s: %.1f pts > %.1f pts", symbol, spread_points, max_spread)
+            return
+
+        # ATR-relative spread gate — works across EURUSD (pips) and XAUUSD ($)
+        # Skip if spread > 15 % of current ATR (catches unusually wide spreads near news)
+        try:
+            _atr_now = float(df.iloc[idx].get("ATR", 0) or 0)
+            if _atr_now > 0 and spread_price > _atr_now * 0.15:
+                self.logger.info(
+                    "Spread too wide vs ATR for %s: spread=%.5f  ATR×15%%=%.5f",
+                    symbol, spread_price, _atr_now * 0.15,
+                )
+                return
+        except Exception:
+            pass
+
+        entry = float(tick.ask if sig == Signal.BUY else tick.bid)
+        sl, tp = self.strategy.calculate_stop_take_profit(df, idx, sig, entry_price=entry, regime=regime)
+
+        min_rr_ex = float(getattr(self.strategy_cfg, "min_planned_rr_execution", 0.3) or 0.3)
+        if min_rr_ex > 0 and abs(entry - sl) > 0:
+            planned_rr_live = abs(tp - entry) / abs(entry - sl)
+            if planned_rr_live < min_rr_ex:
+                self.logger.info(
+                    "Signal blocked at ticket: Planned R:R %.2f < %.2f",
+                    planned_rr_live,
+                    min_rr_ex,
+                )
+                return
+
+        direction = "buy" if sig == Signal.BUY else "sell"
+
+        ok, _ = self.conn.validate_stops(symbol, entry, float(sl), float(tp))
+        if not ok:
+            return
+
+        summary = self.conn.get_account_summary() or {}
+        eff = self._effective_balance(summary)
+        if eff <= 0:
+            return
+
+        # Margin safety: don't trade if margin level is below 200 %
+        margin_level = float(summary.get("margin_level") or 0.0)
+        if 0.0 < margin_level < 200.0:
+            self.logger.warning(
+                "Low margin level %.1f%% on %s — skipping trade to protect account", margin_level, symbol
+            )
+            return
+
+        # Correlation Filter
+        if self._is_correlated_trade_open(symbol):
+            return
+
+        # Dynamic Risk Sizing (Drawdown Protection + Regime adjustment + Scoring)
+        risk_fraction = self._calculate_dynamic_risk() * risk_multiplier * risk_mult
+        
+        # Capital Protection Mode Risk Override
+        if is_cp_active:
+            risk_fraction = float(getattr(self.strategy_cfg, "cp_risk_fraction", 0.005) or 0.005)
+        
+        tick_size = float(getattr(rules, "tick_size", 0.0) or 0.0)
+        tick_value = float(getattr(rules, "tick_value", 0.0) or 0.0)
+        if tick_size <= 0 or tick_value <= 0:
+            return
+
+        value_per_price_unit = tick_value / tick_size
+        price_risk = abs(float(entry) - float(sl))
+        if price_risk <= 0:
+            return
+
+        risk_amount_money = float(eff) * float(risk_fraction)
+        risk_per_lot = float(price_risk) * float(value_per_price_unit)
+        if risk_per_lot <= 0:
+            return
+
+        raw_vol = risk_amount_money / risk_per_lot
+        vol = self.conn.normalize_volume(symbol, raw_vol)
+        if vol is None or float(vol) <= 0:
+            return
+
+        new_risk_amount = abs(float(entry) - float(sl)) * float(value_per_price_unit) * float(vol)
+        max_open_risk = float(getattr(self.strategy_cfg, "max_total_open_risk", 0.03) or 0.03) * float(eff)
+        open_risk = self._open_risk_amount()
+        if (open_risk + new_risk_amount) > max_open_risk:
+            self.logger.warning(
+                "Exposure limit reached: open_risk=%.2f + new_risk=%.2f > max_open_risk=%.2f",
+                open_risk,
+                new_risk_amount,
+                max_open_risk,
+            )
+            self.notifier.send(
+                f"Exposure limit reached: open_risk={open_risk:.2f} + new_risk={new_risk_amount:.2f} > max_open_risk={max_open_risk:.2f}"
+            )
+            return
+
+        session = self._session_name()
+        self.logger.info("Signal %s %s | entry=%.5f sl=%.5f tp=%.5f vol=%.2f session=%s score=%d regime=%s", 
+                        direction.upper(), symbol, entry, sl, tp, vol, session, score, regime.value)
+        self._place_trade(symbol, direction, entry, float(sl), float(tp), float(vol), confluence_score=conf_score, confluence_details=conf_details, score=score, regime=regime.value)
+
+    def _is_correlated_trade_open(self, symbol: str) -> bool:
+        """Check if a trade is already open in a correlated symbol."""
+        correlation_map = {
+            "EURUSD": ["GBPUSD", "AUDUSD", "NZDUSD"],
+            "GBPUSD": ["EURUSD", "AUDUSD"],
+            "XAUUSD": ["XAGUSD"],
+            "USDCAD": ["USDJPY"], # USD strength pairs
+        }
+        correlated_pairs = correlation_map.get(symbol, [])
+        for cp in correlated_pairs:
+            if self._has_open_position(cp):
+                self.logger.info("Correlation Filter: Skipping %s because %s is open", symbol, cp)
+                return True
+        return False
+
+    def _calculate_dynamic_risk(self) -> float:
+        """Scale risk by intraday loss vs equity (anti-martingale), using config thresholds."""
+        base_risk = float(getattr(self.strategy_cfg, "risk_per_trade", 0.005) or 0.005)
+        summary = self.conn.get_account_summary() or {}
+        dd = self._daily_loss_fraction(summary)
+        soft = float(getattr(self.strategy_cfg, "dynamic_risk_daily_dd_soft", 0.025) or 0.025)
+        hard = float(getattr(self.strategy_cfg, "dynamic_risk_daily_dd_hard", 0.05) or 0.05)
+        m_soft = float(getattr(self.strategy_cfg, "dynamic_risk_soft_multiplier", 0.88) or 0.88)
+        m_hard = float(getattr(self.strategy_cfg, "dynamic_risk_hard_multiplier", 0.72) or 0.72)
+        if hard > 0 and dd >= hard:
+            return base_risk * m_hard
+        if soft > 0 and dd >= soft:
+            return base_risk * m_soft
+        return base_risk
+
+    def _send_heartbeat(self) -> None:
+        """Send a periodic 12-hour status heartbeat to Telegram."""
+        now = time.time()
+        if now - getattr(self, "_last_heartbeat", 0) < 43200:
+            return
+        self._last_heartbeat = now
+        try:
+            acc_info  = self.conn.get_account_info()
+            balance   = float(getattr(acc_info, "balance", 0.0) or 0.0) if acc_info else 0.0
+            is_active = self._is_bot_switch_enabled() and self._is_autotrading_enabled()
+            icon      = "🟢" if is_active else "🔴"
+            label     = "Trading Active" if is_active else "Paused"
+            open_cnt  = len([t for t in self.trade_manager.open_trades.values()
+                             if int(getattr(t, "magic", 0) or 0) == int(self.system_cfg.magic)])
+            daily_dd  = self._daily_loss_fraction() * 100.0
+            tg_msg = (
+                f"❤️ HEARTBEAT — {icon} {label}\n"
+                f"Balance: ${balance:,.2f}  |  Open trades: {open_cnt}\n"
+                f"Daily P&L: {'-' if daily_dd > 0 else '+'}{daily_dd:.2f}%"
+            )
+            self.logger.info("Heartbeat: %s active=%s balance=%.2f daily_dd=%.2f%%",
+                             label, is_active, balance, daily_dd)
+            self.notifier.send(tg_msg)
+        except Exception as exc:
+            self.logger.warning("Heartbeat error: %s", exc)
+    
+    def _setup_commands(self) -> None:
+        # Core commands
+        self.notifier.register_command("/status",    self._cmd_status)
+        self.notifier.register_command("/stop",      self._cmd_stop)
+        self.notifier.register_command("/start",     self._cmd_start)
+        self.notifier.register_command("/report",    self._cmd_report)
+        # New conversational commands
+        self.notifier.register_command("/help",      self._cmd_help)
+        self.notifier.register_command("/menu",      self._cmd_help)
+        self.notifier.register_command("/balance",   self._cmd_balance)
+        self.notifier.register_command("/positions", self._cmd_positions)
+        self.notifier.register_command("/pause",     self._cmd_stop)    # alias
+        self.notifier.register_command("/resume",    self._cmd_start)   # alias
+        self.notifier.register_command("/risk",      self._cmd_risk)
+    
+    def _cmd_report(self) -> str:
+        # Import report generator
+        sys.path.append(os.path.abspath(os.path.join(os.getcwd(), "scripts")))
+        try:
+            import generate_report
+            path, metrics = generate_report.generate_report(
+                state_path=self.system_cfg.state_path,
+                output_path=os.path.join("logs", f"report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png")
+            )
+            if path:
+                self.notifier.send_photo(path, caption=f"📊 Performance Report\n\n{metrics}")
+                return "✅ Report generated and sent!"
+            else:
+                return f"❌ Failed to generate report: {metrics}"
+        except Exception as exc:
+            self.logger.exception("Error in /report command: %s", exc)
+            return f"❌ Error: {exc}"
+    
+    def _cmd_status(self) -> str:
+        try:
+            acc       = self.conn.get_account_info()
+            positions = self.conn.get_positions()
+            pos_count = len(list(positions)) if positions else 0
+            is_active = self._is_bot_switch_enabled() and self._is_autotrading_enabled()
+            icon      = "🟢 ACTIVE" if is_active else "🔴 PAUSED"
+            balance   = float(getattr(acc, "balance", 0.0) or 0.0) if acc else 0.0
+            equity    = float(getattr(acc, "equity",  0.0) or 0.0) if acc else 0.0
+            login     = int(getattr(acc, "login", 0) or 0) if acc else 0
+            daily_dd  = self._daily_loss_fraction() * 100.0
+            meta      = self.trade_manager.meta or {}
+            cp_line   = "\n🛡️ Capital Protection ACTIVE" if meta.get("capital_protection_active") else ""
+            return (
+                f"📊 BOT STATUS\n"
+                f"{'─'*26}\n"
+                f"Status:      {icon}\n"
+                f"Account:     {login}\n"
+                f"Balance:     ${balance:,.2f}\n"
+                f"Equity:      ${equity:,.2f}\n"
+                f"Open Trades: {pos_count}\n"
+                f"Daily Loss:  {daily_dd:.2f}%\n"
+                f"Symbols:     {', '.join(self.system_cfg.symbols)}\n"
+                f"Timeframe:   {self.system_cfg.timeframe}"
+                f"{cp_line}"
+            )
+        except Exception as exc:
+            self.logger.exception("_cmd_status error: %s", exc)
+            return f"❌ Could not get status: {exc}"
+
+    def _cmd_stop(self) -> str:
+        with open(self.system_cfg.bot_switch_path, "w") as f:
+            f.write("off")
+        return "🛑 Bot has been PAUSED. No new trades will be taken."
+
+    def _cmd_start(self) -> str:
+        with open(self.system_cfg.bot_switch_path, "w") as f:
+            f.write("on")
+        return "🚀 Bot has been RESUMED. Scanning for signals..."
+
+    def _cmd_help(self) -> None:
+        """Send the interactive main menu with inline keyboard buttons."""
+        text = (
+            "🤖 RSI-Pullback Trading Bot\n\n"
+            "What would you like to do? Tap a button or type a command:"
+        )
+        self.notifier.send_menu(text)
+        return None  # response already sent via send_menu
+
+    def _cmd_balance(self) -> str:
+        """Detailed account balance snapshot."""
+        try:
+            acc = self.conn.get_account_info()
+            summary = self.conn.get_account_summary() or {}
+            daily_loss_pct = self._daily_loss_fraction(summary) * 100.0
+            balance  = float(getattr(acc, "balance",     0.0) or 0.0)
+            equity   = float(getattr(acc, "equity",      0.0) or 0.0)
+            margin_f = float(getattr(acc, "margin_free", 0.0) or 0.0)
+            pnl      = equity - balance
+            pnl_sign = "+" if pnl >= 0 else "-"
+            cap_lim  = float(getattr(self.strategy_cfg, "capital_allocation", 0.0) or 0.0)
+            cap_str  = f"${cap_lim:,.0f}" if cap_lim > 0 else "Full balance"
+            return (
+                f"💰 ACCOUNT BALANCE\n"
+                f"{'─'*24}\n"
+                f"Balance:      ${balance:,.2f}\n"
+                f"Equity:       ${equity:,.2f}\n"
+                f"Free Margin:  ${margin_f:,.2f}\n"
+                f"Floating P&L: {pnl_sign}${abs(pnl):,.2f}\n"
+                f"Daily Loss:   {daily_loss_pct:.2f}% / {float(getattr(self.strategy_cfg,'max_daily_loss',0.06))*100:.0f}% max\n"
+                f"Capital Limit:{cap_str}"
+            )
+        except Exception as exc:
+            self.logger.exception("_cmd_balance error: %s", exc)
+            return f"❌ Could not fetch balance: {exc}"
+
+    def _cmd_positions(self) -> str:
+        """List every open position with entry, current P&L, and magic."""
+        try:
+            positions = self.conn.get_positions()
+            pos_list  = list(positions) if positions else []
+            if not pos_list:
+                return "📈 No open positions right now."
+
+            lines = [f"📈 OPEN POSITIONS ({len(pos_list)})", "─" * 28]
+            for p in pos_list:
+                ptype   = int(getattr(p, "type",       0) or 0)
+                side    = "BUY" if ptype == 0 else "SELL"
+                symbol  = str(getattr(p, "symbol",     "?"))
+                volume  = float(getattr(p, "volume",   0.0) or 0.0)
+                entry   = float(getattr(p, "price_open", 0.0) or 0.0)
+                sl      = float(getattr(p, "sl",        0.0) or 0.0)
+                tp      = float(getattr(p, "tp",        0.0) or 0.0)
+                profit  = float(getattr(p, "profit",    0.0) or 0.0)
+                magic   = int(getattr(p, "magic",      0)   or 0)
+                emoji   = "💚" if profit >= 0 else "🔴"
+                mine    = " ✦" if magic == int(self.system_cfg.magic) else ""
+                lines.append(
+                    f"{emoji} {symbol} {side} {volume}L{mine}\n"
+                    f"   Entry: {entry:.5f}  SL: {sl:.5f}  TP: {tp:.5f}\n"
+                    f"   P&L: ${profit:+.2f}"
+                )
+            return "\n".join(lines)
+        except Exception as exc:
+            self.logger.exception("_cmd_positions error: %s", exc)
+            return f"❌ Could not fetch positions: {exc}"
+
+    def _cmd_risk(self) -> str:
+        """Current risk configuration and dynamic adjustments."""
+        try:
+            cfg        = self.strategy_cfg
+            meta       = self.trade_manager.meta or {}
+            cp_active  = bool(meta.get("capital_protection_active", False))
+            base_r     = float(getattr(cfg, "risk_per_trade",        0.01) or 0.01) * 100
+            max_r      = float(getattr(cfg, "max_risk_per_trade",    0.02) or 0.02) * 100
+            max_dd     = float(getattr(cfg, "max_drawdown",          0.15) or 0.15) * 100
+            max_daily  = float(getattr(cfg, "max_daily_loss",        0.06) or 0.06) * 100
+            max_open   = float(getattr(cfg, "max_total_open_risk",  0.075) or 0.075) * 100
+            streak_lim = int(getattr(cfg, "losing_streak_pause_after", 6) or 6)
+            current_r  = self._calculate_dynamic_risk() * 100
+            cp_r       = float(getattr(cfg, "cp_risk_fraction", 0.006) or 0.006) * 100
+            cp_status = f"🛡️ ACTIVE — {cp_r:.2f}% risk" if cp_active else "✅ Normal mode"
+            return (
+                f"⚙️ RISK SETTINGS\n"
+                f"{'─'*24}\n"
+                f"Base risk/trade:    {base_r:.2f}%\n"
+                f"Current risk:       {current_r:.3f}% (dyn. adjusted)\n"
+                f"Max risk/trade:     {max_r:.2f}%\n"
+                f"Max daily loss:     {max_daily:.0f}%\n"
+                f"Max drawdown:       {max_dd:.0f}%\n"
+                f"Open risk limit:    {max_open:.1f}%\n"
+                f"Losing streak pause:{streak_lim} losses\n"
+                f"Capital Protection: {cp_status}"
+            )
+        except Exception as exc:
+            self.logger.exception("_cmd_risk error: %s", exc)
+            return f"❌ Could not fetch risk settings: {exc}"
+
+    def _restart_terminal(self) -> None:
+        """Emergency restart of the MT5 terminal (VPS watchdog)."""
+        terminal_path = os.getenv("MT5_TERMINAL_PATH", "")
+        if not terminal_path or not os.path.exists(terminal_path):
+            self.logger.error("Watchdog: MT5_TERMINAL_PATH not found, cannot restart.")
+            return
+
+        self.logger.warning("Watchdog: Disconnected for too long. Restarting MT5 terminal...")
+        self.notifier.send("🚨 MT5 disconnected 30 min. Restarting terminal...")
+
+        # Kill existing instance cleanly
+        try:
+            subprocess.run(["taskkill", "/f", "/im", "terminal64.exe"],
+                           capture_output=True, timeout=10)
+        except Exception:
+            pass
+        time.sleep(5)
+
+        # Launch MT5 terminal (non-blocking)
+        try:
+            subprocess.Popen(
+                [terminal_path],
+                creationflags=subprocess.CREATE_NEW_CONSOLE if sys.platform == "win32" else 0,
+            )
+        except Exception as exc:
+            self.logger.error("Watchdog: Failed to launch terminal: %s", exc)
+            return
+
+        self.logger.info("Watchdog: MT5 launched, waiting 45s for it to connect...")
+        time.sleep(45)
+
+        if self.conn.initialize():
+            self.logger.info("Watchdog: MT5 reconnected successfully.")
+            self.notifier.send("✅ MT5 terminal restarted and reconnected.")
+        else:
+            self.logger.error("Watchdog: MT5 still not connected after restart.")
+
+    def run_forever(self, confirm_trading: bool) -> None:
+        self.logger.info("System starting | magic=%s | symbols=%s | tf=%s", self.system_cfg.magic, self.system_cfg.symbols, self.system_cfg.timeframe)
+        self._last_heartbeat = 0  # force immediate heartbeat on start
+        self._shutdown_requested = False
+
+        # ── Graceful shutdown on SIGTERM / SIGINT (VPS reboot / Ctrl+C) ──────
+        def _handle_signal(signum, frame):
+            self.logger.warning("Shutdown signal received (%s). Exiting cleanly...", signum)
+            self.notifier.send("🛑 Bot shutting down (system signal). Positions left open.")
+            self._shutdown_requested = True
+
+        signal.signal(signal.SIGTERM, _handle_signal)
+        signal.signal(signal.SIGINT,  _handle_signal)
+        # ──────────────────────────────────────────────────────────────────────
+
+        _reconnect_wait = int(self.system_cfg.poll_seconds)  # start at poll interval
+        while not self._shutdown_requested:
+            self.notifier.poll_updates()
+            self._send_heartbeat()
+            
+            # Watchdog: Restart terminal if disconnected for too long
+            if not self.conn.connected:
+                self._conn_fail_count += 1
+                if self._conn_fail_count >= 30: # 30 polls * 60s = 30 mins
+                    self._restart_terminal()
+                    self._conn_fail_count = 0
+            else:
+                self._conn_fail_count = 0
+
+            if not self._connection_guard():
+                # Exponential backoff: double wait each failure up to 5 min max
+                _reconnect_wait = min(_reconnect_wait * 2, 300)
+                self.logger.warning("Connection guard failed. Retrying in %ds...", _reconnect_wait)
+                time.sleep(_reconnect_wait)
+                continue
+
+            _reconnect_wait = int(self.system_cfg.poll_seconds)  # reset on success
+
+            autotrading_enabled = self._autotrading_gate()
+            bot_enabled = self._bot_switch_gate()
+            allow_actions = autotrading_enabled and bot_enabled
+
+            risk_halted = self._risk_limits_gate()
+
+            # 1) Always sync/adopt existing positions; modify SL/TP only if AutoTrading is enabled
+            self.supervisor.manage_all(allow_modify=allow_actions)
+
+            # 2) Optional entry logic (also gated by AutoTrading)
+            if confirm_trading and allow_actions and (not risk_halted):
+                for sym in self.system_cfg.symbols:
+                    self.evaluate_and_trade(sym)
+
+            time.sleep(max(1, int(self.system_cfg.poll_seconds)))
+
+        # Clean shutdown
+        self.logger.info("Bot loop exited cleanly.")
+        try:
+            self.conn.shutdown()
+        except Exception:
+            pass
+
+
+def build_system_config_from_env(symbols: list[str], timeframe: str, poll_seconds: int) -> SystemConfig:
+    magic = int(float(os.getenv("BOT_MAGIC", 0) or 0))
+    state_path = str(os.getenv("TRADES_STATE_PATH", "data/trades_state.json") or "data/trades_state.json")
+    avoid_news_minutes = int(float(os.getenv("AVOID_NEWS_MINUTES", 60) or 60))
+    cfg_json = str(os.getenv("CONFIG_JSON", "config/config_rsi_pullback.json") or "config/config_rsi_pullback.json")
+    bot_switch_path = str(os.getenv("BOT_SWITCH_PATH", "data/bot_switch.txt") or "data/bot_switch.txt")
+    return SystemConfig(
+        symbols=symbols,
+        timeframe=timeframe,
+        poll_seconds=int(poll_seconds),
+        magic=magic,
+        state_path=state_path,
+        avoid_news_minutes=avoid_news_minutes,
+        config_json_path=cfg_json,
+        bot_switch_path=bot_switch_path,
+    )
+
+
+def load_env() -> None:
+    if load_dotenv is None:
+        return
+    load_dotenv(override=False)

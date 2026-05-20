@@ -1,0 +1,13 @@
+MetaTrader5
+pandas
+numpy
+requests
+python-dotenv
+python-telegram-bot==20.7
+tabulate
+matplotlib
+psutil
+mysql-connector-python>=8.3.0
+streamlit>=1.35.0
+plotly>=5.22.0
+certifi>=2024.2.2
