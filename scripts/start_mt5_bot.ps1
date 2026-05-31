@@ -1,6 +1,7 @@
 $ErrorActionPreference = "Stop"
 
-$workspace = Split-Path -Parent $MyInvocation.MyCommand.Path
+$scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+$workspace = Split-Path -Parent $scriptDir
 Set-Location $workspace
 
 $pythonExe = "C:\Users\emmanuel\AppData\Local\Programs\Python\Python312\python.exe"
@@ -18,8 +19,8 @@ if ($existing) {
     exit 0
 }
 
-$stdoutLog = Join-Path $workspace "bot_run.log"
-$stderrLog = Join-Path $workspace "bot_run.err"
+$stdoutLog = Join-Path $workspace "logs\bot_run.log"
+$stderrLog = Join-Path $workspace "logs\bot_run.err"
 
 Start-Process `
     -FilePath $pythonExe `

@@ -48,6 +48,7 @@ class TradingConfig:
     capital_allocation: float = 0.0
     max_risk_per_trade: float = 0.02
     max_total_open_risk: float = 0.075    # FIX: was 0.005 — allow up to 3 concurrent trades
+    max_open_trades: int = 3
     max_daily_loss: float = 0.06          # FIX: was 0.015 — aligned with config
     allow_partial_close: bool = False
 

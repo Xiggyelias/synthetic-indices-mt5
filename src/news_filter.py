@@ -46,7 +46,7 @@ class NewsFilterConfig:
     url: str = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
     urls: Tuple[str, ...] = DEFAULT_NEWS_URLS
     avoid_minutes: int = 90
-    impact_levels: Tuple[str, ...] = ("High", "Medium")
+    impact_levels: Tuple[str, ...] = ("High",)
     request_timeout_seconds: int = 10
     cache_ttl_seconds: int = 15 * 60
 
@@ -268,38 +268,66 @@ class NewsFilter:
 
     def is_blocked(self, symbol: str, now: Optional[datetime] = None) -> Tuple[bool, str]:
         if not self.config.enabled or self.config.avoid_minutes <= 0:
+            self.logger.debug("News filter disabled or avoid_minutes=%d", self.config.avoid_minutes)
             return False, ""
 
         now_dt = now or datetime.now(timezone.utc)
         base, quote = self._symbol_currencies(symbol)
         if not base or not quote:
+            self.logger.error("Cannot parse currencies from symbol: %s", symbol)
             return False, ""
 
         events = self._fetch()
         window = timedelta(minutes=int(self.config.avoid_minutes))
 
+        self.logger.debug(
+            "[NEWS_FILTER] Checking %s (base=%s quote=%s) against %d events | window=%d mins | now=%s | impact_levels=%s",
+            symbol, base, quote, len(events), self.config.avoid_minutes, now_dt.isoformat(), self.config.impact_levels
+        )
+
         for ev in events:
             impact = self._normalize_impact(str(ev.get("impact", "") or ""))
             if impact and impact not in self.config.impact_levels:
+                self.logger.debug(
+                    "Event '%s' skipped: impact=%s not in %s",
+                    ev.get("title", "?"), impact, self.config.impact_levels
+                )
                 continue
             currency = str(ev.get("country", "") or ev.get("currency", "") or "").strip().upper()
             # Professional: Monitor Base, Quote, AND USD (Global reserve currency)
             if currency not in {base, quote, "USD"}:
+                self.logger.debug(
+                    "Event '%s' skipped: currency=%s not in {%s,%s,USD}",
+                    ev.get("title", "?"), currency, base, quote
+                )
                 continue
 
             ev_time = self._parse_event_time(ev)
             if ev_time is None:
+                self.logger.debug("Event '%s' skipped: cannot parse time", ev.get("title", "?"))
                 continue
 
-            if abs(ev_time - now_dt) <= window:
+            time_diff = abs(ev_time - now_dt)
+            self.logger.debug(
+                "Checking event: title='%s' currency=%s impact=%s time=%s diff_from_now=%s <= window=%s?",
+                ev.get("title", "?"), currency, impact, ev_time.isoformat(), time_diff, window
+            )
+
+            if time_diff <= window:
                 title = str(ev.get("title", "") or ev.get("event", "") or "news")
                 details = self._format_event_details(ev)
                 source_url = str(ev.get("source_url", "") or self._cache_source or self.config.url or "")
+                remaining_mins = (window - time_diff).total_seconds() / 60.0
+                self.logger.warning(
+                    "[NEWS_FILTER_BLOCKED] %s | EVENT=%s | CURRENCY=%s | IMPACT=%s | TIME=%s | REMAINING_MINS=%.1f | DETAILS=%s",
+                    symbol, title, currency, impact, ev_time.isoformat(), remaining_mins, details
+                )
                 return (
                     True,
-                    f"Blocked by red news ({currency} {impact}): {title} @ {ev_time.isoformat()} | source={source_url}{details}",
+                    f"Blocked by {impact} news ({currency}): {title} @ {ev_time.isoformat()} | {remaining_mins:.1f} mins remaining | Details:{details}",
                 )
 
+        self.logger.debug("[NEWS_FILTER_CLEAR] %s passed all news checks", symbol)
         return False, ""
 
 

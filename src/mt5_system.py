@@ -77,10 +77,14 @@ def load_trading_config_from_json(path: str) -> TradingConfig:
         cfg.max_risk_per_trade = float(rm.get("max_risk_per_trade") or cfg.max_risk_per_trade)
     if "max_total_open_risk" in rm:
         cfg.max_total_open_risk = float(rm.get("max_total_open_risk") or cfg.max_total_open_risk)
+    if "max_open_trades" in rm:
+        cfg.max_open_trades = int(rm.get("max_open_trades") or cfg.max_open_trades)
     if "max_daily_loss" in rm:
         cfg.max_daily_loss = float(rm.get("max_daily_loss") or cfg.max_daily_loss)
     if "allow_partial_close" in rm:
         cfg.allow_partial_close = bool(rm.get("allow_partial_close"))
+    if "atr_trailing_mult" in rm:
+        cfg.atr_trailing_mult = float(rm.get("atr_trailing_mult") or cfg.atr_trailing_mult)
     if "initial_capital" in rm:
         cfg.initial_capital = float(rm.get("initial_capital"))
 
@@ -139,6 +143,16 @@ def load_trading_config_from_json(path: str) -> TradingConfig:
 
     cfg.volume_multiplier = float(vol.get("volume_multiplier", cfg.volume_multiplier))
     cfg.volume_period = int(vol.get("volume_period", cfg.volume_period))
+
+    execution = (sp.get("execution") or {})
+    if "max_spread_points" in execution:
+        cfg.max_spread_points = int(float(execution.get("max_spread_points") or 0))
+    if "max_slippage_points" in execution:
+        cfg.max_slippage_points = int(float(execution.get("max_slippage_points") or cfg.max_slippage_points))
+    if "friday_close_enabled" in execution:
+        cfg.friday_close_enabled = bool(execution.get("friday_close_enabled"))
+    if "friday_close_hour_utc" in execution:
+        cfg.friday_close_hour_utc = int(float(execution.get("friday_close_hour_utc") or cfg.friday_close_hour_utc))
 
     cfg.sr_lookback = int(sr.get("sr_lookback", cfg.sr_lookback))
     cfg.sr_tolerance = float(sr.get("sr_tolerance", cfg.sr_tolerance))
@@ -238,6 +252,7 @@ class MT5BotSystem:
         self._last_conn_check: float = time.time()
         self._conn_fail_count: int = 0
         self._last_performance_review_count: int = 0
+        self._market_status_last: dict[str, str] = {}
         self._setup_commands()
 
     def _effective_balance(self, summary: dict) -> float:
@@ -274,6 +289,8 @@ class MT5BotSystem:
         if self.trade_manager.meta.get("halted"):
             reason = str(self.trade_manager.meta.get("halt_reason") or "").strip()
             return f"Risk Halted: {reason}" if reason else "Risk Halted"
+        if not self._is_weekly_market_open():
+            return "Scanning (Market Closed)"
         return "Running"
 
     def _telegram_status_snapshot(self) -> dict:
@@ -541,7 +558,16 @@ class MT5BotSystem:
         pos = sorted(candidates, key=sort_key, reverse=True)[0]
         return int(getattr(pos, "ticket", 0) or getattr(pos, "identifier", 0) or 0)
 
-    def _place_trade(self, symbol: str, direction: str, entry: float, sl: float, tp: float, volume: float, confluence_score: int = 0, confluence_details: dict = None, score: int = 0, regime: str = "") -> None:
+    def _place_trade(self, symbol: str, direction: str, entry: float, sl: float, tp: float, volume: float, confluence_score: int = 0, confluence_details: dict = None, score: int = 0, regime: str = "") -> bool:
+        self.logger.critical(
+            "═══════════════════════════════════════════════════════════════════════════════════════\n"
+            "🟢 PLACE_TRADE_START 🟢\n"
+            "   Symbol: %s | Direction: %s | Entry: %.5f | SL: %.5f | TP: %.5f | Vol: %.2f\n"
+            "   Score: %d | Regime: %s | Confluence: %d\n"
+            "═══════════════════════════════════════════════════════════════════════════════════════",
+            symbol, direction.upper(), entry, sl, tp, volume, score, regime, confluence_score
+        )
+
         result = self.conn.send_market_order(
             symbol=symbol,
             direction=direction,
@@ -552,9 +578,38 @@ class MT5BotSystem:
             magic=int(self.system_cfg.magic),
             comment=f"score{score}@{datetime.now(timezone.utc).isoformat()}",
         )
+
         if result is None:
-            self.notifier.send(f"Order failed: {symbol} {direction.upper()} vol={volume}")
-            return
+            err = self.conn.get_last_order_error()
+            detail = str(err.get("message") or "").strip()
+            stage = str(err.get("stage") or "order_send")
+            self.logger.error(
+                "❌ ORDER_SEND_RETURNED_NONE: %s %s | entry=%.5f sl=%.5f tp=%.5f vol=%.2f | stage=%s | detail=%s",
+                direction.upper(), symbol, entry, sl, tp, volume, stage, detail
+            )
+            if detail:
+                self.notifier.send(f"Order blocked: {symbol} {direction.upper()} vol={volume}\n{detail}")
+            else:
+                self.notifier.send(f"Order failed: {symbol} {direction.upper()} vol={volume}")
+            return False
+
+        retcode = int(getattr(result, "retcode", -1) or -1)
+        retcode_comment = str(getattr(result, "comment", "") or "")
+        order_id = int(getattr(result, "order", 0) or 0)
+        deal_id = int(getattr(result, "deal", 0) or 0)
+
+        if retcode != 10009:  # TRADE_RETCODE_DONE = 10009
+            self.logger.error(
+                "❌ ORDER_REJECTED: retcode=%d comment='%s' | %s %s %.2f %s",
+                retcode, retcode_comment, direction.upper(), symbol, volume, "lots"
+            )
+            self.notifier.send(f"❌ Order rejected: {symbol} | retcode={retcode} | {retcode_comment}")
+            return False
+
+        self.logger.critical(
+            "✅ ORDER_ACCEPTED: retcode=%d | order=%d | deal=%d | %s %s %.2f lots @ %.5f",
+            retcode, order_id, deal_id, direction.upper(), symbol, volume, entry
+        )
 
         ticket = self._resolve_position_ticket(
             symbol=symbol,
@@ -624,6 +679,15 @@ class MT5BotSystem:
             self.trade_manager.meta = meta
             self.trade_manager.save()
 
+        self.logger.critical(
+            "═══════════════════════════════════════════════════════════════════════════════════════\n"
+            "✅ PLACE_TRADE_COMPLETE - POSITION RECORDED\n"
+            "   Ticket: %d | Order: %d | Deal: %d | Regime: %s | Session: %s\n"
+            "═══════════════════════════════════════════════════════════════════════════════════════",
+            ticket, order_id, deal_id, regime, session
+        )
+        return True
+
     def _is_high_liquidity_session(self) -> bool:
         """Check if current time is within London or NY session (UTC)."""
         now_utc = datetime.now(timezone.utc)
@@ -645,6 +709,149 @@ class MT5BotSystem:
         if in_ny:
             return "New York"
         return "Off-Session"
+
+    def _is_weekly_market_open(self, now_utc: Optional[datetime] = None) -> bool:
+        now = now_utc or datetime.now(timezone.utc)
+        weekday = now.weekday()  # Monday=0, Sunday=6
+        if weekday == 5:
+            return False
+        if weekday == 6 and now.hour < 21:
+            return False
+        if weekday == 4 and now.hour >= 21:
+            return False
+        return True
+
+    def _market_status_key(self, is_open: bool, reason: str) -> str:
+        text = str(reason or "").lower()
+        if "last quote is" in text:
+            text = "stale quote"
+        return f"{int(is_open)}:{text}"
+
+    def _is_closed_market_reason(self, reason: str) -> bool:
+        text = str(reason or "").lower()
+        closed_markers = (
+            "weekly market close",
+            "market appears closed",
+            "no live tick",
+            "quote is invalid",
+            "quote time is unavailable",
+        )
+        return any(marker in text for marker in closed_markers)
+
+    def _market_entry_status(self, symbol: str, direction: str = "") -> tuple[bool, str]:
+        max_age = int(float(os.getenv("MARKET_OPEN_MAX_TICK_AGE_SECONDS", "1800") or 1800))
+        try:
+            is_open, reason = self.conn.is_symbol_tradable_now(
+                symbol,
+                direction=direction,
+                max_tick_age_seconds=max_age,
+            )
+        except Exception as exc:
+            self.logger.exception("Market status check failed for %s: %s", symbol, exc)
+            is_open, reason = False, f"market status check failed: {exc}"
+
+        status_key = self._market_status_key(is_open, reason)
+        if self._market_status_last.get(symbol) != status_key:
+            if is_open:
+                msg = f"Market open for {symbol}: live entries enabled."
+                self.logger.info(msg)
+            else:
+                if self._is_closed_market_reason(reason):
+                    msg = f"Market closed for {symbol}: {reason}. Scanning only; valid setups will be queued for re-check."
+                else:
+                    msg = f"Market not tradable for {symbol}: {reason}. Entries blocked until this clears."
+                self.logger.warning(msg)
+            self.notifier.send(msg)
+            self._market_status_last[symbol] = status_key
+
+        return bool(is_open), str(reason or "")
+
+    def _pending_market_signals(self) -> dict:
+        meta = self.trade_manager.meta or {}
+        pending = meta.get("pending_market_closed_signals")
+        if not isinstance(pending, dict):
+            pending = {}
+            meta["pending_market_closed_signals"] = pending
+            self.trade_manager.meta = meta
+        return pending
+
+    def _queue_closed_market_signal(
+        self,
+        symbol: str,
+        direction: str,
+        entry: float,
+        sl: float,
+        tp: float,
+        score: int,
+        confluence_score: int,
+        regime: str,
+        candle_time: str,
+        reason: str,
+    ) -> None:
+        planned_rr = abs(tp - entry) / abs(entry - sl) if abs(entry - sl) > 0 else 0.0
+        pending = self._pending_market_signals()
+        payload = {
+            "symbol": symbol,
+            "direction": direction.upper(),
+            "entry": float(entry),
+            "stop_loss": float(sl),
+            "take_profit": float(tp),
+            "score": int(score),
+            "confluence_score": int(confluence_score),
+            "regime": str(regime),
+            "planned_rr": float(planned_rr),
+            "candle_time": str(candle_time),
+            "queued_at": datetime.now(timezone.utc).isoformat(),
+            "reason": str(reason or "market closed"),
+        }
+
+        existing = pending.get(symbol)
+        dedupe_key = (
+            payload["direction"],
+            payload["candle_time"],
+            payload["score"],
+            payload["confluence_score"],
+        )
+        existing_key = None
+        if isinstance(existing, dict):
+            existing_key = (
+                existing.get("direction"),
+                existing.get("candle_time"),
+                existing.get("score"),
+                existing.get("confluence_score"),
+            )
+
+        pending[symbol] = payload
+        self.trade_manager.meta["pending_market_closed_signals"] = pending
+        self.trade_manager.save()
+
+        if existing_key == dedupe_key:
+            return
+
+        self.logger.info(
+            "Closed-market setup queued: %s %s score=%s confluence=%s rr=%.2f candle=%s",
+            symbol,
+            payload["direction"],
+            score,
+            confluence_score,
+            planned_rr,
+            candle_time,
+        )
+        self.notifier.send(
+            "Market closed - setup queued for re-check\n"
+            f"{symbol} {payload['direction']} | score={score} | confluence={confluence_score} | RR={planned_rr:.2f}\n"
+            f"Entry={entry:.5f} SL={sl:.5f} TP={tp:.5f}\n"
+            f"Reason: {reason}\n"
+            "The bot will rescan and place it only if it is still valid when the broker is tradable."
+        )
+
+    def _clear_pending_closed_market_signal(self, symbol: str) -> None:
+        pending = self._pending_market_signals()
+        if symbol not in pending:
+            return
+        pending.pop(symbol, None)
+        self.trade_manager.meta["pending_market_closed_signals"] = pending
+        self.trade_manager.save()
 
     def _check_losing_streak(self) -> bool:
         """Check if we should pause due to consecutive losses. Returns True if paused."""
@@ -813,8 +1020,11 @@ class MT5BotSystem:
                     self.conn.close_all_positions(symbol)
                 return
 
+        market_open_for_scan, _ = self._market_entry_status(symbol)
+
         df = self._rates_df(symbol)
         if df is None or len(df) < 250:
+            self.logger.debug("[EVAL_%s] Data check blocked: df_len=%s", symbol, len(df) if df is not None else None)
             return
         df = self.strategy.calculate_indicators(df)
 
@@ -829,6 +1039,9 @@ class MT5BotSystem:
             htf_trend_aligned = self.strategy.check_mtf_trend(mtf_df, Signal.BUY if is_bullish_signal else Signal.SELL)
 
         if not htf_trend_aligned:
+            if market_open_for_scan:
+                self._clear_pending_closed_market_signal(symbol)
+            self.logger.info("[EVAL_%s] HTF_TREND_MISMATCH: D1 trend not aligned with H1 signal", symbol)
             return  # fast-exit: no point running regime + signal if D1 disagrees
 
         # Macro Context & Session Checks
@@ -838,12 +1051,19 @@ class MT5BotSystem:
         self.news.config.avoid_minutes = 120
         news_blocked, news_reason = self.news.is_blocked(symbol)
 
+        self.logger.info(
+            "[EVAL_%s] NEWS_FILTER_CHECK: blocked=%s | reason=%s",
+            symbol, news_blocked, news_reason if news_blocked else "(none)"
+        )
+
         # MARKET REGIME CLASSIFICATION
         regime = self.regime_classifier.classify(df, news_blocked)
-        self.logger.info("Market Regime for %s: %s", symbol, regime.value)
+        self.logger.info("[EVAL_%s] REGIME_CLASSIFIED: regime=%s | news_blocked=%s", symbol, regime.value, news_blocked)
         
         if bool(getattr(self.strategy_cfg, "skip_weak_range_entries", False)) and regime == MarketRegime.RANGING:
-            self.logger.debug("Skipping %s: ranging chop filter enabled", symbol)
+            if market_open_for_scan:
+                self._clear_pending_closed_market_signal(symbol)
+            self.logger.info("[EVAL_%s] SKIP_WEAK_RANGE: ranging chop filter enabled", symbol)
             return
         
         # Capital Protection Mode Checks
@@ -852,10 +1072,12 @@ class MT5BotSystem:
         if is_cp_active:
             cp_max_day = int(getattr(self.strategy_cfg, "cp_max_trades_per_day", 4) or 4)
             if meta.get("cp_daily_trades", 0) >= cp_max_day:
+                self.logger.info("[EVAL_%s] CP_MAX_DAILY_TRADES: %d >= %d", symbol, meta.get("cp_daily_trades", 0), cp_max_day)
                 return
             # Break after loss
             pause_until = meta.get("cp_pause_until")
             if pause_until and datetime.now(timezone.utc) < datetime.fromisoformat(pause_until):
+                self.logger.info("[EVAL_%s] CP_PAUSE_ACTIVE: paused until %s", symbol, pause_until)
                 return
 
         sig, score, risk_mult = self.strategy.generate_signal(
@@ -863,7 +1085,11 @@ class MT5BotSystem:
         )
 
         if sig not in (Signal.BUY, Signal.SELL):
+            if market_open_for_scan:
+                self._clear_pending_closed_market_signal(symbol)
+            self.logger.debug("[EVAL_%s] NO_SIGNAL: sig=%s", symbol, sig)
             return
+        direction = "buy" if sig == Signal.BUY else "sell"
             
         # 2. Meaningful level? (Handled by scoring/strategy)
         
@@ -871,7 +1097,9 @@ class MT5BotSystem:
         conf_score, conf_details = self.strategy.confluence_score(df, idx, sig, regime=regime)
         min_conf = int(getattr(self.strategy_cfg, "min_confluence_score", 3) or 3)
         if conf_score < min_conf:
-            self.logger.info("Signal blocked: Confluence score %d < %d", conf_score, min_conf)
+            if market_open_for_scan:
+                self._clear_pending_closed_market_signal(symbol)
+            self.logger.info("[EVAL_%s] CONFLUENCE_BLOCKED: score=%d < min=%d | details=%s", symbol, conf_score, min_conf, conf_details)
             return
             
         # 4. Planned R:R execution floor
@@ -880,32 +1108,57 @@ class MT5BotSystem:
         planned_rr = abs(tp - entry) / abs(entry - sl) if abs(entry - sl) > 0 else 0
         min_rr_ex = float(getattr(self.strategy_cfg, "min_planned_rr_execution", 0.3) or 0.3)
         if min_rr_ex > 0 and planned_rr < min_rr_ex:
-            self.logger.info("Signal blocked: Planned R:R %.2f < %.2f", planned_rr, min_rr_ex)
+            if market_open_for_scan:
+                self._clear_pending_closed_market_signal(symbol)
+            self.logger.info("[EVAL_%s] RR_BLOCKED_EARLY: planned_rr=%.2f < min=%.2f", symbol, planned_rr, min_rr_ex)
             return
 
         cp_min_score = int(getattr(self.strategy_cfg, "cp_min_signal_score", 7) or 7)
         if is_cp_active and score < cp_min_score:
-            self.logger.info("Signal score %d blocked by Capital Protection (min %d)", score, cp_min_score)
+            if market_open_for_scan:
+                self._clear_pending_closed_market_signal(symbol)
+            self.logger.info("[EVAL_%s] CP_SIGNAL_SCORE_BLOCKED: score=%d < min=%d", symbol, score, cp_min_score)
             return
 
         if self._has_open_position(symbol):
+            self.logger.debug("[EVAL_%s] POSITION_EXISTS: already open on this symbol", symbol)
             return
+
+        max_open_trades = int(getattr(self.strategy_cfg, "max_open_trades", 0) or 0)
+        if max_open_trades > 0:
+            open_count = len(
+                [t for t in self.trade_manager.open_trades.values() if int(getattr(t, "magic", 0) or 0) == int(self.system_cfg.magic)]
+            )
+            if open_count >= max_open_trades:
+                self.logger.info("[EVAL_%s] MAX_OPEN_TRADES: %d >= %d", symbol, open_count, max_open_trades)
+                return
 
         # Session filter: only trade during high-liquidity sessions
         if not self._is_high_liquidity_session():
-            return
+            if market_open_for_scan:
+                self.logger.debug("[EVAL_%s] OFF_SESSION: not in London or NY session", symbol)
+                return
+            self.logger.debug("[EVAL_%s] OFF_SESSION while market is closed; continuing scan-only.", symbol)
 
         # Losing streak pause
         if self._check_losing_streak():
+            self.logger.info("[EVAL_%s] LOSING_STREAK: paused due to consecutive losses", symbol)
             return
 
+        # ═════════════════════════════════════════════════════════════════════════════════════════════════════
+        # CRITICAL: NEWS_MODE BLOCKING SECTION
+        # ═════════════════════════════════════════════════════════════════════════════════════════════════════
         if regime == MarketRegime.NEWS_MODE:
             key = f"{symbol}:NEWS_MODE"
             if key != self._news_block_last:
-                self.logger.info("News filter blocked %s: %s", symbol, news_reason)
+                self.logger.critical(
+                    "[EVAL_%s] ⛔ NEWS_MODE_BLOCKING_TRADE ⛔ | REASON: %s | AVOID_WINDOW_MINS: %d",
+                    symbol, news_reason, self.news.config.avoid_minutes
+                )
                 self.notifier.send(f"⚠️ NEWS MODE Detected! Standing aside on {symbol}.\nReason: {news_reason}")
                 self._news_block_last = key
             return
+        # ═════════════════════════════════════════════════════════════════════════════════════════════════════
 
         if self._news_block_last.startswith(f"{symbol}:"):
             self._news_block_last = ""
@@ -915,17 +1168,39 @@ class MT5BotSystem:
         if regime == MarketRegime.VOLATILE:
             vol_mult = float(getattr(self.strategy_cfg, "volatile_regime_risk_multiplier", 0.78) or 0.78)
             self.logger.warning(
-                "VOLATILE Market Detected on %s! Reducing size to %.0f%% of base; widening stops.",
+                "[EVAL_%s] VOLATILE_MODE: reducing risk to %.0f%% of base",
                 symbol,
                 vol_mult * 100.0,
             )
             risk_multiplier = vol_mult
-        
+
+        market_open, market_reason = self._market_entry_status(symbol, direction)
+        if not market_open:
+            if not self._is_closed_market_reason(market_reason):
+                self.logger.warning("[EVAL_%s] ENTRY_BLOCKED_NOT_TRADABLE: %s", symbol, market_reason)
+                return
+            candle_time = str(df.index[idx].isoformat())
+            self._queue_closed_market_signal(
+                symbol=symbol,
+                direction=direction,
+                entry=float(entry),
+                sl=float(sl),
+                tp=float(tp),
+                score=int(score),
+                confluence_score=int(conf_score),
+                regime=str(regime.value),
+                candle_time=candle_time,
+                reason=market_reason,
+            )
+            return
+
         tick = self.conn.get_symbol_price(symbol)
         if tick is None:
+            self.logger.error("[EVAL_%s] TICK_FAILED: cannot get current price", symbol)
             return
         rules = self.conn.get_broker_rules(symbol)
         if rules is None:
+            self.logger.error("[EVAL_%s] RULES_FAILED: cannot get broker rules", symbol)
             return
 
         spread_points = 0.0
@@ -940,7 +1215,7 @@ class MT5BotSystem:
         # Fixed-point spread gate (optional, config-driven; 0 = disabled)
         max_spread = float(getattr(self.strategy_cfg, "max_spread_points", 0) or 0)
         if max_spread > 0 and spread_points > max_spread:
-            self.logger.info("Spread too high for %s: %.1f pts > %.1f pts", symbol, spread_points, max_spread)
+            self.logger.info("[EVAL_%s] SPREAD_BLOCKED: spread=%.1f pts > max=%.1f pts", symbol, spread_points, max_spread)
             return
 
         # ATR-relative spread gate — works across EURUSD (pips) and XAUUSD ($)
@@ -949,7 +1224,7 @@ class MT5BotSystem:
             _atr_now = float(df.iloc[idx].get("ATR", 0) or 0)
             if _atr_now > 0 and spread_price > _atr_now * 0.15:
                 self.logger.info(
-                    "Spread too wide vs ATR for %s: spread=%.5f  ATR×15%%=%.5f",
+                    "[EVAL_%s] SPREAD_ATR_BLOCKED: spread=%.5f > atr*15%=%.5f",
                     symbol, spread_price, _atr_now * 0.15,
                 )
                 return
@@ -964,33 +1239,37 @@ class MT5BotSystem:
             planned_rr_live = abs(tp - entry) / abs(entry - sl)
             if planned_rr_live < min_rr_ex:
                 self.logger.info(
-                    "Signal blocked at ticket: Planned R:R %.2f < %.2f",
+                    "[EVAL_%s] RR_BLOCKED_FINAL: planned_rr=%.2f < min=%.2f",
+                    symbol,
                     planned_rr_live,
                     min_rr_ex,
                 )
                 return
 
-        direction = "buy" if sig == Signal.BUY else "sell"
-
         ok, _ = self.conn.validate_stops(symbol, entry, float(sl), float(tp))
         if not ok:
+            self.logger.error("[EVAL_%s] STOP_VALIDATION_FAILED", symbol)
             return
 
         summary = self.conn.get_account_summary() or {}
         eff = self._effective_balance(summary)
         if eff <= 0:
+            self.logger.error("[EVAL_%s] EFFECTIVE_BALANCE_INVALID: eff=%.2f", symbol, eff)
             return
 
         # Margin safety: don't trade if margin level is below 200 %
         margin_level = float(summary.get("margin_level") or 0.0)
         if 0.0 < margin_level < 200.0:
             self.logger.warning(
-                "Low margin level %.1f%% on %s — skipping trade to protect account", margin_level, symbol
+                "[EVAL_%s] LOW_MARGIN: level=%.1f%% (need >= 200%%)",
+                symbol,
+                margin_level
             )
             return
 
         # Correlation Filter
         if self._is_correlated_trade_open(symbol):
+            self.logger.info("[EVAL_%s] CORRELATED_POSITION_OPEN: skipped to avoid correlation", symbol)
             return
 
         # Dynamic Risk Sizing (Drawdown Protection + Regime adjustment + Scoring)
@@ -1003,21 +1282,25 @@ class MT5BotSystem:
         tick_size = float(getattr(rules, "tick_size", 0.0) or 0.0)
         tick_value = float(getattr(rules, "tick_value", 0.0) or 0.0)
         if tick_size <= 0 or tick_value <= 0:
+            self.logger.error("[EVAL_%s] TICK_SIZE_INVALID: tick_size=%.6f tick_value=%.6f", symbol, tick_size, tick_value)
             return
 
         value_per_price_unit = tick_value / tick_size
         price_risk = abs(float(entry) - float(sl))
         if price_risk <= 0:
+            self.logger.error("[EVAL_%s] PRICE_RISK_INVALID: entry=%.5f sl=%.5f", symbol, entry, sl)
             return
 
         risk_amount_money = float(eff) * float(risk_fraction)
         risk_per_lot = float(price_risk) * float(value_per_price_unit)
         if risk_per_lot <= 0:
+            self.logger.error("[EVAL_%s] RISK_PER_LOT_INVALID", symbol)
             return
 
         raw_vol = risk_amount_money / risk_per_lot
         vol = self.conn.normalize_volume(symbol, raw_vol)
         if vol is None or float(vol) <= 0:
+            self.logger.error("[EVAL_%s] VOLUME_INVALID: normalized_vol=%s", symbol, vol)
             return
 
         new_risk_amount = abs(float(entry) - float(sl)) * float(value_per_price_unit) * float(vol)
@@ -1025,7 +1308,8 @@ class MT5BotSystem:
         open_risk = self._open_risk_amount()
         if (open_risk + new_risk_amount) > max_open_risk:
             self.logger.warning(
-                "Exposure limit reached: open_risk=%.2f + new_risk=%.2f > max_open_risk=%.2f",
+                "[EVAL_%s] EXPOSURE_LIMIT_BLOCKED: open_risk=%.2f + new=%.2f > max=%.2f",
+                symbol,
                 open_risk,
                 new_risk_amount,
                 max_open_risk,
@@ -1035,10 +1319,25 @@ class MT5BotSystem:
             )
             return
 
+        # ═════════════════════════════════════════════════════════════════════════════════════════════════════
+        # REACHED ORDER SUBMISSION ✅
+        # ═════════════════════════════════════════════════════════════════════════════════════════════════════
         session = self._session_name()
-        self.logger.info("Signal %s %s | entry=%.5f sl=%.5f tp=%.5f vol=%.2f session=%s score=%d regime=%s", 
-                        direction.upper(), symbol, entry, sl, tp, vol, session, score, regime.value)
-        self._place_trade(symbol, direction, entry, float(sl), float(tp), float(vol), confluence_score=conf_score, confluence_details=conf_details, score=score, regime=regime.value)
+        self.logger.critical(
+            "✅ [EVAL_%s] PASSING ALL GATES - SUBMITTING ORDER 🟢\n"
+            "   Signal=%s | Entry=%.5f | SL=%.5f | TP=%.5f | Vol=%.2f\n"
+            "   Session=%s | Score=%d | Regime=%s | Confluence=%d",
+            symbol, direction.upper(), entry, sl, tp, vol,
+            session, score, regime.value, conf_score
+        )
+
+        placed = self._place_trade(
+            symbol, direction, entry, float(sl), float(tp), float(vol),
+            confluence_score=conf_score, confluence_details=conf_details,
+            score=score, regime=regime.value
+        )
+        if placed:
+            self._clear_pending_closed_market_signal(symbol)
 
     def _is_correlated_trade_open(self, symbol: str) -> bool:
         """Check if a trade is already open in a correlated symbol."""
@@ -1142,10 +1441,16 @@ class MT5BotSystem:
             daily_dd  = self._daily_loss_fraction() * 100.0
             meta      = self.trade_manager.meta or {}
             cp_line   = "\n🛡️ Capital Protection ACTIVE" if meta.get("capital_protection_active") else ""
+            weekly_open = self._is_weekly_market_open()
+            if is_active and not weekly_open:
+                icon = "🟡 SCAN-ONLY"
+            pending = meta.get("pending_market_closed_signals") if isinstance(meta.get("pending_market_closed_signals"), dict) else {}
+            pending_line = f"\nQueued Setups:{len(pending):>5}" if pending else ""
             return (
                 f"📊 BOT STATUS\n"
                 f"{'─'*26}\n"
                 f"Status:      {icon}\n"
+                f"Market:      {'Open' if weekly_open else 'Closed (scan only)'}\n"
                 f"Account:     {login}\n"
                 f"Balance:     ${balance:,.2f}\n"
                 f"Equity:      ${equity:,.2f}\n"
@@ -1153,6 +1458,7 @@ class MT5BotSystem:
                 f"Daily Loss:  {daily_dd:.2f}%\n"
                 f"Symbols:     {', '.join(self.system_cfg.symbols)}\n"
                 f"Timeframe:   {self.system_cfg.timeframe}"
+                f"{pending_line}"
                 f"{cp_line}"
             )
         except Exception as exc:
@@ -1347,9 +1653,10 @@ class MT5BotSystem:
             allow_actions = autotrading_enabled and bot_enabled
 
             risk_halted = self._risk_limits_gate()
+            weekly_market_open = self._is_weekly_market_open()
 
             # 1) Always sync/adopt existing positions; modify SL/TP only if AutoTrading is enabled
-            self.supervisor.manage_all(allow_modify=allow_actions)
+            self.supervisor.manage_all(allow_modify=allow_actions and weekly_market_open)
 
             # 2) Optional entry logic (also gated by AutoTrading)
             if confirm_trading and allow_actions and (not risk_halted):

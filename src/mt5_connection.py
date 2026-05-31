@@ -16,8 +16,8 @@ import logging
 import math
 import time
 from dataclasses import dataclass
-from datetime import datetime
-from typing import Dict, Optional, Tuple, Union
+from datetime import datetime, timezone
+from typing import Any, Dict, Optional, Tuple, Union
 
 import MetaTrader5 as mt5
 
@@ -91,6 +91,7 @@ class MT5Connection:
         self.initialize_timeout_ms = initialize_timeout_ms
         self.connected: bool = False
         self._account_cache: Optional[mt5.AccountInfo] = None
+        self.last_order_error: Dict[str, Any] = {}
 
         logging.basicConfig(
             level=logging.INFO,
@@ -549,6 +550,68 @@ class MT5Connection:
     def last_error() -> Tuple[int, str]:
         return mt5.last_error()
 
+    def get_last_order_error(self) -> Dict[str, Any]:
+        return dict(self.last_order_error or {})
+
+    def is_symbol_tradable_now(
+        self,
+        symbol: str,
+        direction: str = "",
+        max_tick_age_seconds: int = 1800,
+    ) -> Tuple[bool, str]:
+        """Return whether a new market order can be sent for this symbol now."""
+        now_utc = datetime.now(timezone.utc)
+        weekday = now_utc.weekday()  # Monday=0, Sunday=6
+        if weekday == 5:
+            return False, "weekly market close: Saturday"
+        if weekday == 6 and now_utc.hour < 21:
+            return False, "weekly market close: before Sunday 21:00 UTC open"
+        if weekday == 4 and now_utc.hour >= 21:
+            return False, "weekly market close: after Friday 21:00 UTC close"
+
+        info = self.ensure_symbol(symbol)
+        if info is None:
+            return False, f"{symbol} is not available in MT5"
+
+        try:
+            trade_mode = int(getattr(info, "trade_mode", -1))
+        except Exception:
+            trade_mode = -1
+        disabled = getattr(mt5, "SYMBOL_TRADE_MODE_DISABLED", 0)
+        close_only = getattr(mt5, "SYMBOL_TRADE_MODE_CLOSEONLY", 3)
+        long_only = getattr(mt5, "SYMBOL_TRADE_MODE_LONGONLY", 1)
+        short_only = getattr(mt5, "SYMBOL_TRADE_MODE_SHORTONLY", 2)
+
+        if trade_mode == disabled:
+            return False, f"{symbol} trading is disabled by the broker"
+        if trade_mode == close_only:
+            return False, f"{symbol} is close-only at the broker"
+
+        side = str(direction or "").lower()
+        if side == "buy" and trade_mode == short_only:
+            return False, f"{symbol} is short-only at the broker"
+        if side == "sell" and trade_mode == long_only:
+            return False, f"{symbol} is long-only at the broker"
+
+        tick = mt5.symbol_info_tick(symbol)
+        if tick is None:
+            return False, f"{symbol} has no live tick"
+
+        bid = float(getattr(tick, "bid", 0.0) or 0.0)
+        ask = float(getattr(tick, "ask", 0.0) or 0.0)
+        if bid <= 0 or ask <= 0:
+            return False, f"{symbol} quote is invalid: bid={bid} ask={ask}"
+
+        tick_time = float(getattr(tick, "time", 0.0) or 0.0)
+        if tick_time <= 0:
+            return False, f"{symbol} quote time is unavailable"
+
+        tick_age = max(0.0, now_utc.timestamp() - tick_time)
+        if tick_age > max(1, int(max_tick_age_seconds)):
+            return False, f"{symbol} market appears closed: last quote is {int(tick_age)}s old"
+
+        return True, ""
+
     def is_trading_allowed(self) -> bool:
         info = self.get_account_info()
         return bool(info and info.trade_allowed)
@@ -697,28 +760,42 @@ class MT5Connection:
         """
         Submit a broker-compliant market order. Returns TradeResult on success.
         """
+        self.last_order_error = {}
 
         if not self.ensure_connected():
+            self._set_last_order_error(symbol=symbol, stage="connection", message="MT5 is not connected")
             return None
-        if not self.is_trading_allowed():
-            self.logger.error("Trading not allowed on this account. Aborting order send.")
-            return None
-
         order_type = direction.lower()
         if order_type not in {"buy", "sell"}:
             raise ValueError("direction must be 'buy' or 'sell'")
+        if not self.is_trading_allowed():
+            msg = "Trading not allowed on this account. Aborting order send."
+            self.logger.error(msg)
+            self._set_last_order_error(symbol=symbol, stage="account", message=msg)
+            return None
 
         info = self.ensure_symbol(symbol)
         if info is None:
+            self._set_last_order_error(symbol=symbol, stage="symbol", message=f"{symbol} is not available")
+            return None
+
+        tradable, market_reason = self.is_symbol_tradable_now(symbol, order_type)
+        if not tradable:
+            msg = f"Order not sent: {market_reason}"
+            self.logger.warning("%s | symbol=%s side=%s", msg, symbol, order_type.upper())
+            self._set_last_order_error(symbol=symbol, stage="market", message=msg)
             return None
 
         normalized_volume = self.normalize_volume(symbol, volume)
         if normalized_volume is None:
+            self._set_last_order_error(symbol=symbol, stage="volume", message=f"Invalid volume requested: {volume}")
             return None
 
         tick = mt5.symbol_info_tick(symbol)
         if tick is None:
-            self.logger.error("No tick data for %s; cannot determine execution price", symbol)
+            msg = f"No tick data for {symbol}; cannot determine execution price"
+            self.logger.error(msg)
+            self._set_last_order_error(symbol=symbol, stage="price", message=msg)
             return None
 
         price = tick.ask if order_type == "buy" else tick.bid
@@ -729,7 +806,9 @@ class MT5Connection:
 
         ok, err = self.validate_stops(symbol, price, sl or None, tp or None)
         if not ok:
-            self.logger.error("Stop validation failed for %s: %s", symbol, err)
+            msg = f"Stop validation failed for {symbol}: {err}"
+            self.logger.error(msg)
+            self._set_last_order_error(symbol=symbol, stage="stops", message=msg)
             return None
 
         request = {
@@ -747,31 +826,68 @@ class MT5Connection:
             "type_filling": self._select_filling_mode(info),
         }
 
+        self.logger.critical(
+            "═══════════════════════════════════════════════════════════════════════════════════════\n"
+            "🟢 SEND_MARKET_ORDER 🟢\n"
+            "   Symbol: %s | Type: %s | Volume: %.2f | Price: %.5f\n"
+            "   SL: %.5f | TP: %.5f | Magic: %d | Deviation: %d | Filling: %d\n"
+            "   Comment: %s\n"
+            "═══════════════════════════════════════════════════════════════════════════════════════",
+            symbol, order_type.upper(), normalized_volume, price,
+            sl, tp, magic, deviation, request["type_filling"], comment
+        )
+
         invalid_fill_retcode = getattr(mt5, "TRADE_RETCODE_INVALID_FILL", None)
         tried_modes = []
-        for mode in [
+        for mode_attempt, mode in enumerate([
             request["type_filling"],
             mt5.ORDER_FILLING_IOC,
             mt5.ORDER_FILLING_FOK,
             mt5.ORDER_FILLING_RETURN,
-        ]:
+        ]):
             if mode in tried_modes:
                 continue
             tried_modes.append(mode)
             request["type_filling"] = mode
+
+            self.logger.info("[MT5_ORDER_SEND] Attempt %d: filling_mode=%d | symbol=%s | %s %.2f",
+                           mode_attempt + 1, mode, symbol, order_type.upper(), normalized_volume)
+
             result = mt5.order_send(request)
             if result is None:
                 code, msg = mt5.last_error()
-                self.logger.error("Order send returned None for %s: [%s] %s", symbol, code, msg)
+                self.logger.error(
+                    "❌ MT5_ORDER_SEND_NONE: symbol=%s | error_code=%d | error_msg=%s",
+                    symbol, code, msg
+                )
+                self._set_last_order_error(
+                    symbol=symbol,
+                    stage="order_send",
+                    message=f"MT5 order_send returned None: [{code}] {msg}",
+                    code=code,
+                )
                 return None
-            if result.retcode == mt5.TRADE_RETCODE_DONE:
-                self.logger.info(
-                    "Order executed: %s %.2f %s at %.5f | ticket=%s",
+
+            retcode = int(getattr(result, "retcode", -1) or -1)
+            result_comment = str(getattr(result, "comment", "") or "")
+            order_id = int(getattr(result, "order", 0) or 0)
+            deal_id = int(getattr(result, "deal", 0) or 0)
+
+            self.logger.info(
+                "[MT5_RESULT] retcode=%d | order=%d | deal=%d | comment='%s'",
+                retcode, order_id, deal_id, result_comment
+            )
+
+            if retcode == mt5.TRADE_RETCODE_DONE:
+                self.last_order_error = {}
+                self.logger.critical(
+                    "✅ ORDER_EXECUTED: %s %.2f %s at %.5f | ticket=%d | deal=%d",
                     order_type.upper(),
                     normalized_volume,
                     symbol,
                     price,
-                    result.order,
+                    order_id,
+                    deal_id,
                 )
 
                 if sl or tp:
@@ -821,24 +937,37 @@ class MT5Connection:
             is_invalid_fill = invalid_fill_retcode is not None and result.retcode == invalid_fill_retcode
             if is_invalid_fill or ("Unsupported filling mode" in (result.comment or "")):
                 self.logger.warning(
-                    "Order rejected for %s due to filling mode; trying next | retcode=%s | comment=%s",
+                    "❌ ORDER_REJECTED_FILL: symbol=%s | retcode=%d | comment=%s | Trying next mode...",
                     symbol,
-                    result.retcode,
-                    result.comment,
+                    retcode,
+                    result_comment,
                 )
                 continue
 
             self.logger.error(
-                "Order rejected for %s | retcode=%s | comment=%s",
+                "❌ ORDER_REJECTED: symbol=%s | retcode=%d | comment=%s | NOT_RETRYING (fatal)",
                 symbol,
-                result.retcode,
-                result.comment,
+                retcode,
+                result_comment,
+            )
+            self._set_last_order_error(
+                symbol=symbol,
+                stage="broker",
+                message=self._format_order_rejection(retcode, result_comment),
+                retcode=retcode,
+                comment=result_comment,
             )
             return None
 
         self.logger.error(
-            "Order rejected for %s: no supported filling mode found.",
+            "❌ ORDER_REJECTED_ALL_MODES: symbol=%s | No supported filling mode found | Tried: %s",
             symbol,
+            tried_modes,
+        )
+        self._set_last_order_error(
+            symbol=symbol,
+            stage="filling",
+            message=f"No supported filling mode found. Tried: {tried_modes}",
         )
         return None
 
@@ -934,6 +1063,45 @@ class MT5Connection:
         if price is None:
             return 0.0
         return round(price, digits)
+
+    def _set_last_order_error(self, symbol: str, stage: str, message: str, **extra: Any) -> None:
+        self.last_order_error = {
+            "symbol": symbol,
+            "stage": stage,
+            "message": message,
+            "time_utc": datetime.now(timezone.utc).isoformat(),
+            **extra,
+        }
+
+    @staticmethod
+    def _format_order_rejection(retcode: int, comment: str = "") -> str:
+        labels = (
+            ("TRADE_RETCODE_REQUOTE", "requote"),
+            ("TRADE_RETCODE_REJECT", "request rejected"),
+            ("TRADE_RETCODE_CANCEL", "request cancelled"),
+            ("TRADE_RETCODE_INVALID", "invalid request"),
+            ("TRADE_RETCODE_INVALID_VOLUME", "invalid volume"),
+            ("TRADE_RETCODE_INVALID_PRICE", "invalid price"),
+            ("TRADE_RETCODE_INVALID_STOPS", "invalid SL/TP"),
+            ("TRADE_RETCODE_TRADE_DISABLED", "trading disabled"),
+            ("TRADE_RETCODE_MARKET_CLOSED", "market closed"),
+            ("TRADE_RETCODE_NO_MONEY", "not enough margin"),
+            ("TRADE_RETCODE_PRICE_CHANGED", "price changed"),
+            ("TRADE_RETCODE_PRICE_OFF", "off quotes"),
+            ("TRADE_RETCODE_INVALID_FILL", "invalid filling mode"),
+            ("TRADE_RETCODE_CONNECTION", "connection problem"),
+            ("TRADE_RETCODE_ONLY_REAL", "only allowed on real accounts"),
+        )
+        names = {}
+        for attr, label in labels:
+            code = getattr(mt5, attr, None)
+            if code is not None:
+                names[int(code)] = label
+        reason = names.get(int(retcode), "broker rejected order")
+        comment = str(comment or "").strip()
+        if comment:
+            return f"{reason} (retcode={retcode}, comment={comment})"
+        return f"{reason} (retcode={retcode})"
 
     @staticmethod
     def _select_filling_mode(info: mt5.SymbolInfo) -> int:
