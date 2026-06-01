@@ -49,6 +49,9 @@ class TradingConfig:
     max_risk_per_trade: float = 0.02
     max_total_open_risk: float = 0.075    # FIX: was 0.005 — allow up to 3 concurrent trades
     max_open_trades: int = 3
+    max_open_trades_per_symbol: int = 2
+    max_open_trades_per_direction: int = 2
+    allow_opposite_direction_positions: bool = False
     max_daily_loss: float = 0.06          # FIX: was 0.015 — aligned with config
     allow_partial_close: bool = False
 
@@ -67,6 +70,10 @@ class TradingConfig:
     dynamic_risk_soft_multiplier: float = 0.90  # FIX: was 0.88
     dynamic_risk_hard_multiplier: float = 0.75  # FIX: was 0.72
     volatile_regime_risk_multiplier: float = 0.82  # FIX: was 0.78
+    dynamic_risk_boost_enabled: bool = True
+    dynamic_risk_boost_after_wins: int = 3
+    dynamic_risk_boost_min_daily_gain: float = 0.01
+    dynamic_risk_boost_multiplier: float = 1.25
     
     # Strategy Parameters - UPGRADED DEFAULTS
     timeframe: TimeFrame = TimeFrame.H4  # Filter noise

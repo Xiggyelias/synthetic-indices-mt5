@@ -345,6 +345,14 @@ def load_v2_config_from_json(path: str) -> TradingConfig:
         cfg.max_risk_per_trade = float(rm.get("max_risk_per_trade") or cfg.max_risk_per_trade)
     if "max_total_open_risk" in rm:
         cfg.max_total_open_risk = float(rm.get("max_total_open_risk") or cfg.max_total_open_risk)
+    if "max_open_trades" in rm:
+        cfg.max_open_trades = int(rm.get("max_open_trades") or cfg.max_open_trades)
+    if "max_open_trades_per_symbol" in rm:
+        cfg.max_open_trades_per_symbol = int(rm.get("max_open_trades_per_symbol") or cfg.max_open_trades_per_symbol)
+    if "max_open_trades_per_direction" in rm:
+        cfg.max_open_trades_per_direction = int(rm.get("max_open_trades_per_direction") or cfg.max_open_trades_per_direction)
+    if "allow_opposite_direction_positions" in rm:
+        cfg.allow_opposite_direction_positions = bool(rm.get("allow_opposite_direction_positions"))
     if "max_daily_loss" in rm:
         cfg.max_daily_loss = float(rm.get("max_daily_loss") or cfg.max_daily_loss)
     if "allow_partial_close" in rm:
@@ -378,6 +386,14 @@ def load_v2_config_from_json(path: str) -> TradingConfig:
         cfg.dynamic_risk_hard_multiplier = float(rm.get("dynamic_risk_hard_multiplier") or cfg.dynamic_risk_hard_multiplier)
     if "volatile_regime_risk_multiplier" in rm:
         cfg.volatile_regime_risk_multiplier = float(rm.get("volatile_regime_risk_multiplier") or cfg.volatile_regime_risk_multiplier)
+    if "dynamic_risk_boost_enabled" in rm:
+        cfg.dynamic_risk_boost_enabled = bool(rm.get("dynamic_risk_boost_enabled"))
+    if "dynamic_risk_boost_after_wins" in rm:
+        cfg.dynamic_risk_boost_after_wins = int(rm.get("dynamic_risk_boost_after_wins") or cfg.dynamic_risk_boost_after_wins)
+    if "dynamic_risk_boost_min_daily_gain" in rm:
+        cfg.dynamic_risk_boost_min_daily_gain = float(rm.get("dynamic_risk_boost_min_daily_gain") or cfg.dynamic_risk_boost_min_daily_gain)
+    if "dynamic_risk_boost_multiplier" in rm:
+        cfg.dynamic_risk_boost_multiplier = float(rm.get("dynamic_risk_boost_multiplier") or cfg.dynamic_risk_boost_multiplier)
 
     if "ema_fast" in sp:
         cfg.ema_fast = int(sp.get("ema_fast"))

@@ -15,6 +15,7 @@ ENV/
 .env.production
 .env.development
 .env.staging
+.streamlit/secrets.toml
 
 # Local bot state & trade history files (do not commit live states)
 data/trades_state.json

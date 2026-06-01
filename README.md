@@ -123,7 +123,11 @@ Send any of these to your bot. Inline keyboard auto-appears for unrecognised inp
 
 ### 1. Requirements
 ```bash
+# Dashboard only / Streamlit Community Cloud
 pip install -r requirements.txt
+
+# Full Windows/VPS bot with MetaTrader 5
+pip install -r requirements-bot.txt
 ```
 
 ### 2. Configure `.env`
@@ -189,6 +193,24 @@ All parameters live in `config/config_rsi_pullback.json`. Key values:
 ```
 
 Hot-reload: edit the JSON while the bot runs — changes apply on the next scan cycle.
+
+---
+
+## Free Streamlit Community Cloud Deployment
+
+Use this for the public dashboard only. The live MT5 trading process still needs a Windows machine or Windows VPS with the MetaTrader 5 terminal installed and logged in.
+
+1. Push this repo to GitHub.
+2. Go to `https://share.streamlit.io` and choose **Streamlit Community Cloud**.
+3. Select the repository and branch.
+4. Set the main file path to `dashboard.py`.
+5. In Advanced settings, add this secret/environment value:
+   ```toml
+   CLOUD_DASHBOARD = "true"
+   ```
+6. Click **Deploy**.
+
+Community Cloud will install `requirements.txt`, which intentionally excludes `MetaTrader5` because the cloud dashboard runs on Linux. For the actual trading bot, install `requirements-bot.txt` on Windows/VPS.
 
 ---
 

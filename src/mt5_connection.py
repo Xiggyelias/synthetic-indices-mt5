@@ -51,6 +51,7 @@ class BrokerRules:
     digits: int = 0
     tick_size: float = 0.0
     tick_value: float = 0.0
+    freeze_level_points: int = 0
 
 
 # --- Timeframe mapping helpers ---
@@ -371,9 +372,6 @@ class MT5Connection:
         if info is None:
             return None
 
-        sl = self._round_price(sl, info.digits) if sl else 0.0
-        tp = self._round_price(tp, info.digits) if tp else 0.0
-
         tick = mt5.symbol_info_tick(str(symbol))
         if tick is None:
             self.logger.error("No tick data for %s; cannot validate SL/TP", symbol)
@@ -381,10 +379,12 @@ class MT5Connection:
 
         position_type_buy = getattr(mt5, "POSITION_TYPE_BUY", 0)
         is_buy = bool(getattr(pos, "type", None) == position_type_buy)
+        side = "buy" if is_buy else "sell"
+        sl, tp = self._normalize_order_stops(str(symbol), side, sl if sl else None, tp if tp else None, info)
         price_for_validation = tick.bid if is_buy else tick.ask
-        price_for_validation = self._round_price(price_for_validation, info.digits)
+        price_for_validation = self._normalize_price_for_symbol(str(symbol), price_for_validation, info=info)
 
-        ok, err = self.validate_stops(str(symbol), price_for_validation, sl or None, tp or None)
+        ok, err = self.validate_stops(str(symbol), price_for_validation, sl or None, tp or None, direction=side)
         if not ok:
             self.logger.error("SL/TP validation failed for %s: %s", symbol, err)
             return None
@@ -451,7 +451,7 @@ class MT5Connection:
         is_buy = bool(getattr(pos, "type", None) == position_type_buy)
         order_type = mt5.ORDER_TYPE_SELL if is_buy else mt5.ORDER_TYPE_BUY
         price = tick.bid if is_buy else tick.ask
-        price = self._round_price(price, info.digits)
+        price = self._normalize_price_for_symbol(symbol, price, info=info)
 
         close_vol = float(volume) if volume is not None else float(getattr(pos, "volume", 0.0))
 
@@ -703,6 +703,7 @@ class MT5Connection:
             digits=getattr(info, "digits", 0) or 0,
             tick_size=float(getattr(info, "trade_tick_size", 0.0) or 0.0),
             tick_value=float(getattr(info, "trade_tick_value", 0.0) or 0.0),
+            freeze_level_points=int(getattr(info, "trade_freeze_level", 0) or 0),
         )
 
     def normalize_volume(self, symbol: str, requested_volume: float) -> Optional[float]:
@@ -732,6 +733,7 @@ class MT5Connection:
         price: float,
         stop_loss: Optional[float],
         take_profit: Optional[float],
+        direction: str = "",
     ) -> Tuple[bool, Optional[str]]:
         """
         Validate stop distances against broker stop level (in points).
@@ -739,7 +741,23 @@ class MT5Connection:
         rules = self.get_broker_rules(symbol)
         if rules is None:
             return False, "Missing broker rules"
-        min_distance = rules.stop_level_points * rules.point
+        min_distance = max(rules.stop_level_points, rules.freeze_level_points) * rules.point
+        side = str(direction or "").lower()
+
+        if side == "buy":
+            if stop_loss is not None and float(stop_loss) >= float(price) - min_distance:
+                return False, f"Buy stop loss must be below price by >= {min_distance:.5f}"
+            if take_profit is not None and float(take_profit) <= float(price) + min_distance:
+                return False, f"Buy take profit must be above price by >= {min_distance:.5f}"
+            return True, None
+
+        if side == "sell":
+            if stop_loss is not None and float(stop_loss) <= float(price) + min_distance:
+                return False, f"Sell stop loss must be above price by >= {min_distance:.5f}"
+            if take_profit is not None and float(take_profit) >= float(price) - min_distance:
+                return False, f"Sell take profit must be below price by >= {min_distance:.5f}"
+            return True, None
+
         if stop_loss is not None and abs(price - stop_loss) < min_distance:
             return False, f"Stop loss too close. Needs >= {min_distance:.5f}"
         if take_profit is not None and abs(price - take_profit) < min_distance:
@@ -791,20 +809,16 @@ class MT5Connection:
             self._set_last_order_error(symbol=symbol, stage="volume", message=f"Invalid volume requested: {volume}")
             return None
 
-        tick = mt5.symbol_info_tick(symbol)
-        if tick is None:
+        price = self._current_order_price(symbol, order_type, info)
+        if price is None:
             msg = f"No tick data for {symbol}; cannot determine execution price"
             self.logger.error(msg)
             self._set_last_order_error(symbol=symbol, stage="price", message=msg)
             return None
 
-        price = tick.ask if order_type == "buy" else tick.bid
-        price = self._round_price(price, info.digits)
+        sl, tp = self._normalize_order_stops(symbol, order_type, stop_loss, take_profit, info)
 
-        sl = self._round_price(stop_loss, info.digits) if stop_loss is not None else 0.0
-        tp = self._round_price(take_profit, info.digits) if take_profit is not None else 0.0
-
-        ok, err = self.validate_stops(symbol, price, sl or None, tp or None)
+        ok, err = self.validate_stops(symbol, price, sl or None, tp or None, direction=order_type)
         if not ok:
             msg = f"Stop validation failed for {symbol}: {err}"
             self.logger.error(msg)
@@ -850,6 +864,39 @@ class MT5Connection:
             tried_modes.append(mode)
             request["type_filling"] = mode
 
+            fresh_price = self._current_order_price(symbol, order_type, info)
+            if fresh_price is None:
+                msg = f"No fresh tick data for {symbol}; cannot submit order"
+                self.logger.error(msg)
+                self._set_last_order_error(symbol=symbol, stage="price", message=msg)
+                return None
+            request["price"] = fresh_price
+
+            ok, err = self.validate_stops(symbol, fresh_price, sl or None, tp or None, direction=order_type)
+            if not ok:
+                msg = f"Stop validation failed at live price for {symbol}: {err}"
+                self.logger.error(msg)
+                self._set_last_order_error(symbol=symbol, stage="stops", message=msg)
+                return None
+
+            check_ok, check_msg, check_retcode = self._order_check_request(symbol, request)
+            if not check_ok:
+                self.logger.warning(
+                    "MT5_ORDER_CHECK_FAILED: symbol=%s | retcode=%d | %s",
+                    symbol,
+                    check_retcode,
+                    check_msg,
+                )
+                if invalid_fill_retcode is not None and check_retcode == invalid_fill_retcode:
+                    continue
+                self._set_last_order_error(
+                    symbol=symbol,
+                    stage="order_check",
+                    message=check_msg,
+                    retcode=check_retcode,
+                )
+                return None
+
             self.logger.info("[MT5_ORDER_SEND] Attempt %d: filling_mode=%d | symbol=%s | %s %.2f",
                            mode_attempt + 1, mode, symbol, order_type.upper(), normalized_volume)
 
@@ -878,6 +925,59 @@ class MT5Connection:
                 retcode, order_id, deal_id, result_comment
             )
 
+            if retcode in self._price_retry_retcodes():
+                fresh_price = self._current_order_price(symbol, order_type, info)
+                if fresh_price is None:
+                    msg = f"Price retry failed for {symbol}: no fresh tick"
+                    self.logger.error(msg)
+                    self._set_last_order_error(symbol=symbol, stage="price", message=msg)
+                    return None
+                request["price"] = fresh_price
+                ok, err = self.validate_stops(symbol, fresh_price, sl or None, tp or None, direction=order_type)
+                if not ok:
+                    msg = f"Price retry stop validation failed for {symbol}: {err}"
+                    self.logger.error(msg)
+                    self._set_last_order_error(symbol=symbol, stage="stops", message=msg)
+                    return None
+                check_ok, check_msg, check_retcode = self._order_check_request(symbol, request)
+                if not check_ok:
+                    self.logger.error("ORDER_PRICE_RETRY_CHECK_FAILED: %s | %s", symbol, check_msg)
+                    self._set_last_order_error(
+                        symbol=symbol,
+                        stage="order_check",
+                        message=check_msg,
+                        retcode=check_retcode,
+                    )
+                    return None
+                self.logger.warning(
+                    "ORDER_PRICE_RETRY: symbol=%s | retcode=%d | comment=%s | retry_price=%.5f",
+                    symbol,
+                    retcode,
+                    result_comment,
+                    fresh_price,
+                )
+                result = mt5.order_send(request)
+                if result is None:
+                    code, msg = mt5.last_error()
+                    self._set_last_order_error(
+                        symbol=symbol,
+                        stage="order_send",
+                        message=f"MT5 order_send retry returned None: [{code}] {msg}",
+                        code=code,
+                    )
+                    return None
+                retcode = int(getattr(result, "retcode", -1) or -1)
+                result_comment = str(getattr(result, "comment", "") or "")
+                order_id = int(getattr(result, "order", 0) or 0)
+                deal_id = int(getattr(result, "deal", 0) or 0)
+                self.logger.info(
+                    "[MT5_RESULT_RETRY] retcode=%d | order=%d | deal=%d | comment='%s'",
+                    retcode,
+                    order_id,
+                    deal_id,
+                    result_comment,
+                )
+
             if retcode == mt5.TRADE_RETCODE_DONE:
                 self.last_order_error = {}
                 self.logger.critical(
@@ -885,7 +985,7 @@ class MT5Connection:
                     order_type.upper(),
                     normalized_volume,
                     symbol,
-                    price,
+                    float(getattr(result, "price", 0.0) or request.get("price", price)),
                     order_id,
                     deal_id,
                 )
@@ -1063,6 +1163,104 @@ class MT5Connection:
         if price is None:
             return 0.0
         return round(price, digits)
+
+    @staticmethod
+    def _round_to_tick(price: Optional[float], digits: int, tick_size: float, mode: str = "nearest") -> float:
+        if price is None:
+            return 0.0
+        value = float(price)
+        tick = float(tick_size or 0.0)
+        if tick > 0:
+            scaled = value / tick
+            if mode == "down":
+                value = math.floor(scaled + 1e-12) * tick
+            elif mode == "up":
+                value = math.ceil(scaled - 1e-12) * tick
+            else:
+                value = round(scaled) * tick
+        return round(value, int(digits or 0))
+
+    def _normalize_price_for_symbol(
+        self,
+        symbol: str,
+        price: Optional[float],
+        info: Optional[mt5.SymbolInfo] = None,
+        mode: str = "nearest",
+    ) -> float:
+        if price is None:
+            return 0.0
+        info = info or self.ensure_symbol(symbol)
+        if info is None:
+            return float(price)
+        digits = int(getattr(info, "digits", 0) or 0)
+        tick_size = float(getattr(info, "trade_tick_size", 0.0) or 0.0)
+        return self._round_to_tick(float(price), digits, tick_size, mode=mode)
+
+    def _current_order_price(self, symbol: str, order_type: str, info: mt5.SymbolInfo) -> Optional[float]:
+        tick = mt5.symbol_info_tick(symbol)
+        if tick is None:
+            return None
+        raw_price = tick.ask if order_type == "buy" else tick.bid
+        raw_price = float(raw_price or 0.0)
+        if raw_price <= 0:
+            return None
+        return self._normalize_price_for_symbol(symbol, raw_price, info=info)
+
+    def _normalize_order_stops(
+        self,
+        symbol: str,
+        order_type: str,
+        stop_loss: Optional[float],
+        take_profit: Optional[float],
+        info: mt5.SymbolInfo,
+    ) -> Tuple[float, float]:
+        if order_type == "buy":
+            sl_mode = "down"
+            tp_mode = "up"
+        else:
+            sl_mode = "up"
+            tp_mode = "down"
+        sl = self._normalize_price_for_symbol(symbol, stop_loss, info=info, mode=sl_mode) if stop_loss is not None else 0.0
+        tp = self._normalize_price_for_symbol(symbol, take_profit, info=info, mode=tp_mode) if take_profit is not None else 0.0
+        return sl, tp
+
+    def _order_check_request(self, symbol: str, request: Dict[str, Any]) -> Tuple[bool, str, int]:
+        try:
+            check = mt5.order_check(request)
+        except Exception as exc:
+            return False, f"order_check exception for {symbol}: {exc}", -1
+
+        if check is None:
+            code, msg = mt5.last_error()
+            return False, f"order_check returned None: [{code}] {msg}", int(code or -1)
+
+        raw_retcode = getattr(check, "retcode", -1)
+        retcode = int(raw_retcode) if raw_retcode is not None else -1
+        comment = str(getattr(check, "comment", "") or "")
+        ok_codes = {
+            0,
+            int(getattr(mt5, "TRADE_RETCODE_DONE", 10009)),
+            int(getattr(mt5, "TRADE_RETCODE_DONE_PARTIAL", 10010)),
+            int(getattr(mt5, "TRADE_RETCODE_PLACED", 10008)),
+        }
+        if retcode in ok_codes:
+            return True, "", retcode
+        return False, self._format_order_rejection(retcode, comment), retcode
+
+    @staticmethod
+    def _price_retry_retcodes() -> set[int]:
+        names = (
+            "TRADE_RETCODE_REQUOTE",
+            "TRADE_RETCODE_INVALID_PRICE",
+            "TRADE_RETCODE_PRICE_CHANGED",
+            "TRADE_RETCODE_PRICE_OFF",
+        )
+        values = set()
+        for name in names:
+            code = getattr(mt5, name, None)
+            if code is not None:
+                values.add(int(code))
+        return values
 
     def _set_last_order_error(self, symbol: str, stage: str, message: str, **extra: Any) -> None:
         self.last_order_error = {

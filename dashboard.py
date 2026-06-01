@@ -31,6 +31,20 @@ import streamlit as st
 ROOT = Path(__file__).parent
 sys.path.insert(0, str(ROOT / "src"))
 
+
+def _truthy_env(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+CLOUD_DASHBOARD = _truthy_env("CLOUD_DASHBOARD", default=(sys.platform != "win32"))
+BOT_CONTROLS_ENABLED = (
+    not CLOUD_DASHBOARD
+    and _truthy_env("ENABLE_DASHBOARD_BOT_CONTROLS", default=True)
+)
+
 try:
     from dotenv import load_dotenv
     load_dotenv(ROOT / ".env")
@@ -227,6 +241,17 @@ def load_config() -> dict:
     return _read_json(ROOT / "config" / "config_rsi_pullback.json")
 
 
+def save_config(cfg: dict) -> None:
+    if not BOT_CONTROLS_ENABLED:
+        raise RuntimeError("Dashboard write controls are disabled in read-only mode.")
+    path = ROOT / "config" / "config_rsi_pullback.json"
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(cfg, f, indent=2)
+        f.write("\n")
+    os.replace(tmp, path)
+
+
 def load_log_tail(n: int = 200) -> List[str]:
     log_path = ROOT / "logs" / "bot_run.log"
     if not log_path.exists():
@@ -248,6 +273,8 @@ def get_bot_status() -> str:
 
 
 def set_bot_status(status: str):
+    if not BOT_CONTROLS_ENABLED:
+        raise RuntimeError("Bot controls are disabled in read-only mode.")
     path = ROOT / "data" / "bot_switch.txt"
     path.write_text(status)
 
@@ -583,6 +610,9 @@ with st.sidebar:
     st.markdown("## ⚙️ Bot Control")
     st.divider()
 
+    if not BOT_CONTROLS_ENABLED:
+        st.info("Read-only cloud mode: bot commands and config saves are disabled here. Run the MT5 bot on Windows/VPS.")
+
     bot_status = get_bot_status()
     pid = check_bot_process()
 
@@ -605,13 +635,13 @@ with st.sidebar:
     col_on, col_off = st.columns(2)
     with col_on:
         if st.button("▶ Start", type="primary", use_container_width=True,
-                     disabled=(bot_status == "on")):
+                     disabled=(not BOT_CONTROLS_ENABLED or bot_status == "on")):
             set_bot_status("on")
             st.success("Bot started")
             st.rerun()
     with col_off:
         if st.button("⏹ Stop", type="secondary", use_container_width=True,
-                     disabled=(bot_status == "off")):
+                     disabled=(not BOT_CONTROLS_ENABLED or bot_status == "off")):
             set_bot_status("off")
             st.warning("Bot stopped")
             st.rerun()
@@ -621,6 +651,9 @@ with st.sidebar:
     with st.expander("Run Safety Diagnostic", expanded=False):
         st.caption("Perform a live pre-flight safety diagnostic check on-demand. This executes the bot's self-check suite.")
         if st.button("🛡️ Run Safety Check", use_container_width=True):
+            if not BOT_CONTROLS_ENABLED:
+                st.info("Bot commands are disabled in read-only mode.")
+                st.stop()
             with st.spinner("Running safety checks..."):
                 try:
                     res = subprocess.run(
@@ -663,6 +696,9 @@ with st.sidebar:
 |-----------|-------|
 | Timeframe | **{rp.get('timeframe','?')}** |
 | Risk/trade | **{rm.get('risk_per_trade',0)*100:.0f}%** |
+| Max risk | **{rm.get('max_risk_per_trade',0)*100:.1f}%** |
+| Open trades | **{rm.get('max_open_trades',3)} total / {rm.get('max_open_trades_per_symbol',2)} per symbol** |
+| Risk boost | **{'ON' if rm.get('dynamic_risk_boost_enabled', True) else 'OFF'} / x{rm.get('dynamic_risk_boost_multiplier',1.0)}** |
 | Min RR | **{rm.get('min_risk_reward','?')}** |
 | RSI OB/OS | **{rsi.get('rsi_overbought','?')} / {rsi.get('rsi_oversold','?')}** |
 | Volume | **{vol.get('volume_multiplier','?')}x** |
@@ -756,7 +792,8 @@ st.divider()
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # TABS
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-tab_live, tab_overview, tab_trades, tab_perf, tab_ft, tab_logs = st.tabs([
+tab_tools, tab_live, tab_overview, tab_trades, tab_perf, tab_ft, tab_logs = st.tabs([
+    "Tools",
     "🔴 Live Scanner",
     "📊 Overview",
     "📋 Trades",
@@ -767,6 +804,200 @@ tab_live, tab_overview, tab_trades, tab_perf, tab_ft, tab_logs = st.tabs([
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# TAB: TOOLS
+# â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”
+with tab_tools:
+    st.subheader("Control Center")
+    if not BOT_CONTROLS_ENABLED:
+        st.info("Read-only cloud mode is active. Bot subprocess commands, emergency closes, and config saves are disabled.")
+
+    cfg_tools = load_config()
+    rm_tools = cfg_tools.setdefault("risk_management", {})
+    sp_tools = cfg_tools.setdefault("strategy_parameters", {})
+    ex_tools = sp_tools.setdefault("execution", {})
+
+    c_status, c_config = st.columns([1, 1], gap="large")
+
+    with c_status:
+        st.markdown("#### Bot Tools")
+        b1, b2 = st.columns(2)
+        with b1:
+            if st.button("Run Status Check", use_container_width=True, disabled=not BOT_CONTROLS_ENABLED):
+                res = subprocess.run(
+                    ["python", "mt5_bot.py", "--status-check"],
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    cwd=str(ROOT),
+                )
+                st.code(res.stdout + "\n" + res.stderr, language="text")
+        with b2:
+            if st.button("Run Safety Check", use_container_width=True, disabled=not BOT_CONTROLS_ENABLED):
+                res = subprocess.run(
+                    ["python", "mt5_bot.py", "--safety-check"],
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    cwd=str(ROOT),
+                )
+                st.code(res.stdout + "\n" + res.stderr, language="text")
+
+        if st.button("Emergency Status", use_container_width=True, disabled=not BOT_CONTROLS_ENABLED):
+            res = subprocess.run(
+                ["python", "mt5_bot.py", "--emergency-status"],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                cwd=str(ROOT),
+            )
+            st.code(res.stdout + "\n" + res.stderr, language="text")
+
+        st.markdown("#### Emergency Close")
+        confirm_close = st.checkbox(
+            "I understand this sends close orders for bot-managed positions",
+            disabled=not BOT_CONTROLS_ENABLED,
+        )
+        if st.button("Close All Bot Positions", type="secondary", use_container_width=True, disabled=(not BOT_CONTROLS_ENABLED or not confirm_close)):
+            res = subprocess.run(
+                ["python", "mt5_bot.py", "--close-all", "--confirm-trading"],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                cwd=str(ROOT),
+            )
+            st.code(res.stdout + "\n" + res.stderr, language="text")
+
+        st.markdown("#### Recent Execution Blocks")
+        reject_lines = [
+            line for line in load_log_tail(400)
+            if any(token in line for token in [
+                "ORDER_REJECTED",
+                "ORDER_CHECK_FAILED",
+                "INVALID_PRICE",
+                "STOP_VALIDATION_FAILED",
+                "SPREAD_BLOCKED",
+                "EXPOSURE_LIMIT_BLOCKED",
+            ])
+        ][-20:]
+        st.code("\n".join(reject_lines) if reject_lines else "No recent execution blocks found.", language="text")
+
+    with c_config:
+        st.markdown("#### Risk and Execution")
+        with st.form("risk_execution_config"):
+            risk_pct = st.number_input(
+                "Base risk per trade (%)",
+                min_value=0.01,
+                max_value=10.0,
+                value=float(rm_tools.get("risk_per_trade", 0.01) or 0.01) * 100.0,
+                step=0.05,
+            )
+            max_risk_pct = st.number_input(
+                "Max risk per trade (%)",
+                min_value=0.01,
+                max_value=10.0,
+                value=float(rm_tools.get("max_risk_per_trade", 0.02) or 0.02) * 100.0,
+                step=0.05,
+            )
+            max_open_trades = st.number_input(
+                "Max open trades total",
+                min_value=1,
+                max_value=50,
+                value=int(rm_tools.get("max_open_trades", 3) or 3),
+                step=1,
+            )
+            max_symbol_trades = st.number_input(
+                "Max open trades per symbol",
+                min_value=1,
+                max_value=20,
+                value=int(rm_tools.get("max_open_trades_per_symbol", 2) or 2),
+                step=1,
+            )
+            max_direction_trades = st.number_input(
+                "Max same-direction trades per symbol",
+                min_value=1,
+                max_value=20,
+                value=int(rm_tools.get("max_open_trades_per_direction", 2) or 2),
+                step=1,
+            )
+            allow_opposite = st.checkbox(
+                "Allow opposite-direction positions on same symbol",
+                value=bool(rm_tools.get("allow_opposite_direction_positions", False)),
+            )
+            boost_enabled = st.checkbox(
+                "Enable risk boost after positive conditions",
+                value=bool(rm_tools.get("dynamic_risk_boost_enabled", True)),
+            )
+            boost_after_wins = st.number_input(
+                "Boost after consecutive wins",
+                min_value=1,
+                max_value=20,
+                value=int(rm_tools.get("dynamic_risk_boost_after_wins", 3) or 3),
+                step=1,
+            )
+            boost_daily_gain = st.number_input(
+                "Boost after daily gain (%)",
+                min_value=0.0,
+                max_value=20.0,
+                value=float(rm_tools.get("dynamic_risk_boost_min_daily_gain", 0.01) or 0.01) * 100.0,
+                step=0.1,
+            )
+            boost_mult = st.number_input(
+                "Risk boost multiplier",
+                min_value=1.0,
+                max_value=5.0,
+                value=float(rm_tools.get("dynamic_risk_boost_multiplier", 1.25) or 1.25),
+                step=0.05,
+            )
+            max_slippage = st.number_input(
+                "Max slippage (points)",
+                min_value=1,
+                max_value=500,
+                value=int(ex_tools.get("max_slippage_points", 10) or 10),
+                step=1,
+            )
+            max_spread = st.number_input(
+                "Max spread (points, 0 disables)",
+                min_value=0,
+                max_value=5000,
+                value=int(ex_tools.get("max_spread_points", 0) or 0),
+                step=1,
+            )
+
+            saved = st.form_submit_button(
+                "Save Risk and Execution Settings",
+                use_container_width=True,
+                disabled=not BOT_CONTROLS_ENABLED,
+            )
+
+        if saved:
+            if not BOT_CONTROLS_ENABLED:
+                st.error("Config saves are disabled in read-only mode.")
+            elif risk_pct > max_risk_pct:
+                st.error("Base risk cannot be higher than max risk.")
+            else:
+                rm_tools["risk_per_trade"] = round(risk_pct / 100.0, 6)
+                rm_tools["max_risk_per_trade"] = round(max_risk_pct / 100.0, 6)
+                rm_tools["max_open_trades"] = int(max_open_trades)
+                rm_tools["max_open_trades_per_symbol"] = int(max_symbol_trades)
+                rm_tools["max_open_trades_per_direction"] = int(max_direction_trades)
+                rm_tools["allow_opposite_direction_positions"] = bool(allow_opposite)
+                rm_tools["dynamic_risk_boost_enabled"] = bool(boost_enabled)
+                rm_tools["dynamic_risk_boost_after_wins"] = int(boost_after_wins)
+                rm_tools["dynamic_risk_boost_min_daily_gain"] = round(boost_daily_gain / 100.0, 6)
+                rm_tools["dynamic_risk_boost_multiplier"] = round(float(boost_mult), 4)
+                ex_tools["max_slippage_points"] = int(max_slippage)
+                ex_tools["max_spread_points"] = int(max_spread)
+                save_config(cfg_tools)
+                st.cache_data.clear()
+                st.success("Settings saved. Restart the running bot process for these config changes to take effect.")
+
+        st.markdown("#### Live Risk State")
+        rr1, rr2, rr3 = st.columns(3)
+        rr1.metric("Current Risk", f"{float(meta.get('dynamic_risk_current_pct', float(rm_tools.get('risk_per_trade', 0.01) or 0.01) * 100) or 0):.3f}%")
+        rr2.metric("Risk Mode", str(meta.get("dynamic_risk_reason", "base")))
+        rr3.metric("Win Streak", int(meta.get("consecutive_wins", 0) or 0))
+
+
 # TAB: LIVE SCANNER
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 with tab_live:
@@ -859,7 +1090,7 @@ with tab_live:
         cons_loss = state.get("meta", {}).get("consecutive_losses", 0)
 
         r3, r4 = st.columns(2)
-        r3.metric("Peak Equity",       f"${peak_eq:,.2f}")
+        r3.metric("Current Risk",      f"{float(meta.get('dynamic_risk_current_pct', float(rm.get('risk_per_trade', 0.01) or 0.01) * 100) or 0):.3f}%")
         r4.metric("Max Open Trades",   cfg.get("risk_management", {}).get("max_open_trades", 3))
 
 

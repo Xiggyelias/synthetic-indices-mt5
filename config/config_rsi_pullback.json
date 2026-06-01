@@ -13,6 +13,9 @@
     "max_total_open_risk": 0.075,
     "max_daily_loss": 0.06,
     "max_open_trades": 3,
+    "max_open_trades_per_symbol": 2,
+    "max_open_trades_per_direction": 2,
+    "allow_opposite_direction_positions": false,
     "initial_capital": 10000.0,
     "drawdown_size_reduction": 0.5,
     "atr_trailing_mult": 1.5,
@@ -30,6 +33,10 @@
     "dynamic_risk_soft_multiplier": 0.9,
     "dynamic_risk_hard_multiplier": 0.75,
     "volatile_regime_risk_multiplier": 0.82,
+    "dynamic_risk_boost_enabled": true,
+    "dynamic_risk_boost_after_wins": 3,
+    "dynamic_risk_boost_min_daily_gain": 0.01,
+    "dynamic_risk_boost_multiplier": 1.25,
     "allow_partial_close": false
   },
 

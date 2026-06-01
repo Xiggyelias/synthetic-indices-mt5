@@ -79,6 +79,12 @@ def load_trading_config_from_json(path: str) -> TradingConfig:
         cfg.max_total_open_risk = float(rm.get("max_total_open_risk") or cfg.max_total_open_risk)
     if "max_open_trades" in rm:
         cfg.max_open_trades = int(rm.get("max_open_trades") or cfg.max_open_trades)
+    if "max_open_trades_per_symbol" in rm:
+        cfg.max_open_trades_per_symbol = int(rm.get("max_open_trades_per_symbol") or cfg.max_open_trades_per_symbol)
+    if "max_open_trades_per_direction" in rm:
+        cfg.max_open_trades_per_direction = int(rm.get("max_open_trades_per_direction") or cfg.max_open_trades_per_direction)
+    if "allow_opposite_direction_positions" in rm:
+        cfg.allow_opposite_direction_positions = bool(rm.get("allow_opposite_direction_positions"))
     if "max_daily_loss" in rm:
         cfg.max_daily_loss = float(rm.get("max_daily_loss") or cfg.max_daily_loss)
     if "allow_partial_close" in rm:
@@ -116,6 +122,14 @@ def load_trading_config_from_json(path: str) -> TradingConfig:
         cfg.dynamic_risk_hard_multiplier = float(rm.get("dynamic_risk_hard_multiplier") or cfg.dynamic_risk_hard_multiplier)
     if "volatile_regime_risk_multiplier" in rm:
         cfg.volatile_regime_risk_multiplier = float(rm.get("volatile_regime_risk_multiplier") or cfg.volatile_regime_risk_multiplier)
+    if "dynamic_risk_boost_enabled" in rm:
+        cfg.dynamic_risk_boost_enabled = bool(rm.get("dynamic_risk_boost_enabled"))
+    if "dynamic_risk_boost_after_wins" in rm:
+        cfg.dynamic_risk_boost_after_wins = int(rm.get("dynamic_risk_boost_after_wins") or cfg.dynamic_risk_boost_after_wins)
+    if "dynamic_risk_boost_min_daily_gain" in rm:
+        cfg.dynamic_risk_boost_min_daily_gain = float(rm.get("dynamic_risk_boost_min_daily_gain") or cfg.dynamic_risk_boost_min_daily_gain)
+    if "dynamic_risk_boost_multiplier" in rm:
+        cfg.dynamic_risk_boost_multiplier = float(rm.get("dynamic_risk_boost_multiplier") or cfg.dynamic_risk_boost_multiplier)
 
     if "ema_fast" in sp:
         cfg.ema_fast = int(sp.get("ema_fast"))
@@ -245,9 +259,9 @@ class MT5BotSystem:
         self._bot_switch_last: Optional[bool] = None
         self._news_block_last: str = ""
         self._risk_halt_last: Optional[bool] = None
-        self._consecutive_losses: int = 0
-        self._losing_streak_paused: bool = False
-        self._losing_streak_limit: int = 5
+        self._consecutive_losses: int = int((self.trade_manager.meta or {}).get("consecutive_losses", 0) or 0)
+        self._losing_streak_paused: bool = bool((self.trade_manager.meta or {}).get("losing_streak_paused_at"))
+        self._losing_streak_limit: int = max(1, int(getattr(self.strategy_cfg, "losing_streak_pause_after", 5) or 5))
         self._last_heartbeat: float = 0
         self._last_conn_check: float = time.time()
         self._conn_fail_count: int = 0
@@ -523,6 +537,66 @@ class MT5BotSystem:
             return False
         return len(list(positions)) > 0
 
+    def _open_position_count(
+        self,
+        symbol: str = "",
+        direction: str = "",
+        magic_only: bool = True,
+    ) -> int:
+        positions = self.conn.get_positions(symbol or None)
+        if positions is None:
+            # Local state fallback keeps risk gates usable during a transient MT5 read failure.
+            count = 0
+            want_symbol = str(symbol or "").upper()
+            want_direction = str(direction or "").lower()
+            for t in self.trade_manager.open_trades.values():
+                if magic_only and int(getattr(t, "magic", 0) or 0) != int(self.system_cfg.magic):
+                    continue
+                if want_symbol and str(getattr(t, "symbol", "") or "").upper() != want_symbol:
+                    continue
+                if want_direction and str(getattr(t, "direction", "") or "").lower() != want_direction:
+                    continue
+                count += 1
+            return count
+
+        want_direction = str(direction or "").lower()
+        want_type = None
+        if want_direction == "buy":
+            want_type = 0
+        elif want_direction == "sell":
+            want_type = 1
+
+        count = 0
+        for p in positions:
+            try:
+                if magic_only and int(getattr(p, "magic", 0) or 0) != int(self.system_cfg.magic):
+                    continue
+                if want_type is not None and int(getattr(p, "type", -1) or -1) != int(want_type):
+                    continue
+                count += 1
+            except Exception:
+                continue
+        return count
+
+    def _signal_already_traded(self, symbol: str, direction: str, candle_time: str) -> bool:
+        meta = self.trade_manager.meta or {}
+        traded = meta.get("last_traded_signal_by_symbol")
+        if not isinstance(traded, dict):
+            return False
+        key = f"{str(symbol).upper()}:{str(direction).lower()}"
+        return str(traded.get(key) or "") == str(candle_time)
+
+    def _mark_signal_traded(self, symbol: str, direction: str, candle_time: str) -> None:
+        meta = self.trade_manager.meta or {}
+        traded = meta.get("last_traded_signal_by_symbol")
+        if not isinstance(traded, dict):
+            traded = {}
+        key = f"{str(symbol).upper()}:{str(direction).lower()}"
+        traded[key] = str(candle_time)
+        meta["last_traded_signal_by_symbol"] = traded
+        self.trade_manager.meta = meta
+        self.trade_manager.save()
+
     def _resolve_position_ticket(
         self,
         symbol: str,
@@ -597,6 +671,7 @@ class MT5BotSystem:
         retcode_comment = str(getattr(result, "comment", "") or "")
         order_id = int(getattr(result, "order", 0) or 0)
         deal_id = int(getattr(result, "deal", 0) or 0)
+        filled_entry = float(getattr(result, "price", 0.0) or entry)
 
         if retcode != 10009:  # TRADE_RETCODE_DONE = 10009
             self.logger.error(
@@ -608,7 +683,7 @@ class MT5BotSystem:
 
         self.logger.critical(
             "✅ ORDER_ACCEPTED: retcode=%d | order=%d | deal=%d | %s %s %.2f lots @ %.5f",
-            retcode, order_id, deal_id, direction.upper(), symbol, volume, entry
+            retcode, order_id, deal_id, direction.upper(), symbol, volume, filled_entry
         )
 
         ticket = self._resolve_position_ticket(
@@ -628,10 +703,10 @@ class MT5BotSystem:
 
         self.notifier.send_trade_execution({
             "direction": direction.upper(),
-            "entry_price": str(entry),
+            "entry_price": str(filled_entry),
             "stop_loss": str(sl),
             "take_profit": str(tp),
-            "risk_reward": str(round(abs(tp - entry) / abs(entry - sl), 1)) if abs(entry - sl) > 0 else "N/A",
+            "risk_reward": str(round(abs(tp - filled_entry) / abs(filled_entry - sl), 1)) if abs(filled_entry - sl) > 0 else "N/A",
             "volume_multiplier": str(volume),
             "rsi_value": "N/A",
             "rsi_pullback": "N/A",
@@ -654,7 +729,7 @@ class MT5BotSystem:
             symbol=symbol,
             direction=direction,
             volume=float(volume),
-            entry_price=float(entry),
+            entry_price=float(filled_entry),
             stop_loss=float(sl),
             take_profit=float(tp),
             magic=int(self.system_cfg.magic),
@@ -665,7 +740,7 @@ class MT5BotSystem:
             last_known_tp=float(tp),
             score=score,
             regime=regime,
-            planned_rr=abs(tp - entry) / abs(entry - sl) if abs(entry - sl) > 0 else 0,
+            planned_rr=abs(tp - filled_entry) / abs(filled_entry - sl) if abs(filled_entry - sl) > 0 else 0,
             confluence_signals=conf_lines,
             confluence_score=confluence_score,
             session=session,
@@ -869,6 +944,7 @@ class MT5BotSystem:
                         self._losing_streak_paused = False
                         self._consecutive_losses = 0
                         meta["losing_streak_paused_at"] = None
+                        meta["consecutive_losses"] = 0
                         self.trade_manager.meta = meta
                         self.trade_manager.save()
                         msg = "Losing streak pause lifted after cooldown. Resuming trading."
@@ -893,10 +969,15 @@ class MT5BotSystem:
         if win:
             self._consecutive_losses = 0
             self._losing_streak_paused = False
+            meta["consecutive_wins"] = int(meta.get("consecutive_wins", 0) or 0) + 1
+            meta["consecutive_losses"] = 0
+            meta["losing_streak_paused_at"] = None
             if meta.get("capital_protection_active"):
                 meta["cp_winning_streak"] = meta.get("cp_winning_streak", 0) + 1
         else:
             self._consecutive_losses += 1
+            meta["consecutive_wins"] = 0
+            meta["consecutive_losses"] = int(self._consecutive_losses)
             if meta.get("capital_protection_active"):
                 meta["cp_winning_streak"] = 0
                 # Mandatory 1-hour break after each loss in CP mode
@@ -1029,6 +1110,7 @@ class MT5BotSystem:
         df = self.strategy.calculate_indicators(df)
 
         idx = len(df) - 2
+        candle_time = str(df.index[idx].isoformat())
         
         # HTF Trend Check (D1) — gate early, before any heavy computation
         htf_trend_aligned = True
@@ -1120,17 +1202,54 @@ class MT5BotSystem:
             self.logger.info("[EVAL_%s] CP_SIGNAL_SCORE_BLOCKED: score=%d < min=%d", symbol, score, cp_min_score)
             return
 
-        if self._has_open_position(symbol):
-            self.logger.debug("[EVAL_%s] POSITION_EXISTS: already open on this symbol", symbol)
+        if self._signal_already_traded(symbol, direction, candle_time):
+            self.logger.info(
+                "[EVAL_%s] DUPLICATE_SIGNAL_BLOCKED: %s setup on candle %s was already traded",
+                symbol,
+                direction.upper(),
+                candle_time,
+            )
             return
 
         max_open_trades = int(getattr(self.strategy_cfg, "max_open_trades", 0) or 0)
         if max_open_trades > 0:
-            open_count = len(
-                [t for t in self.trade_manager.open_trades.values() if int(getattr(t, "magic", 0) or 0) == int(self.system_cfg.magic)]
-            )
+            open_count = self._open_position_count(magic_only=True)
             if open_count >= max_open_trades:
                 self.logger.info("[EVAL_%s] MAX_OPEN_TRADES: %d >= %d", symbol, open_count, max_open_trades)
+                return
+
+        symbol_count = self._open_position_count(symbol=symbol, magic_only=True)
+        direction_count = self._open_position_count(symbol=symbol, direction=direction, magic_only=True)
+
+        allow_opposite = bool(getattr(self.strategy_cfg, "allow_opposite_direction_positions", False))
+        if symbol_count > direction_count and not allow_opposite:
+            self.logger.info(
+                "[EVAL_%s] OPPOSITE_DIRECTION_BLOCKED: existing opposite-side position is open",
+                symbol,
+            )
+            return
+
+        max_symbol_trades = int(getattr(self.strategy_cfg, "max_open_trades_per_symbol", 1) or 1)
+        if max_symbol_trades > 0:
+            if symbol_count >= max_symbol_trades:
+                self.logger.info(
+                    "[EVAL_%s] MAX_SYMBOL_TRADES: %d >= %d",
+                    symbol,
+                    symbol_count,
+                    max_symbol_trades,
+                )
+                return
+
+        max_direction_trades = int(getattr(self.strategy_cfg, "max_open_trades_per_direction", 1) or 1)
+        if max_direction_trades > 0:
+            if direction_count >= max_direction_trades:
+                self.logger.info(
+                    "[EVAL_%s] MAX_DIRECTION_TRADES: %s count %d >= %d",
+                    symbol,
+                    direction.upper(),
+                    direction_count,
+                    max_direction_trades,
+                )
                 return
 
         # Session filter: only trade during high-liquidity sessions
@@ -1179,7 +1298,6 @@ class MT5BotSystem:
             if not self._is_closed_market_reason(market_reason):
                 self.logger.warning("[EVAL_%s] ENTRY_BLOCKED_NOT_TRADABLE: %s", symbol, market_reason)
                 return
-            candle_time = str(df.index[idx].isoformat())
             self._queue_closed_market_signal(
                 symbol=symbol,
                 direction=direction,
@@ -1246,9 +1364,9 @@ class MT5BotSystem:
                 )
                 return
 
-        ok, _ = self.conn.validate_stops(symbol, entry, float(sl), float(tp))
+        ok, stop_err = self.conn.validate_stops(symbol, entry, float(sl), float(tp), direction=direction)
         if not ok:
-            self.logger.error("[EVAL_%s] STOP_VALIDATION_FAILED", symbol)
+            self.logger.error("[EVAL_%s] STOP_VALIDATION_FAILED: %s", symbol, stop_err)
             return
 
         summary = self.conn.get_account_summary() or {}
@@ -1278,6 +1396,11 @@ class MT5BotSystem:
         # Capital Protection Mode Risk Override
         if is_cp_active:
             risk_fraction = float(getattr(self.strategy_cfg, "cp_risk_fraction", 0.005) or 0.005)
+        else:
+            max_risk_fraction = float(getattr(self.strategy_cfg, "max_risk_per_trade", 0.02) or 0.02)
+            if max_risk_fraction > 0:
+                risk_fraction = min(float(risk_fraction), max_risk_fraction)
+        risk_fraction = max(0.0, float(risk_fraction))
         
         tick_size = float(getattr(rules, "tick_size", 0.0) or 0.0)
         tick_value = float(getattr(rules, "tick_value", 0.0) or 0.0)
@@ -1337,6 +1460,7 @@ class MT5BotSystem:
             score=score, regime=regime.value
         )
         if placed:
+            self._mark_signal_traded(symbol, direction, candle_time)
             self._clear_pending_closed_market_signal(symbol)
 
     def _is_correlated_trade_open(self, symbol: str) -> bool:
@@ -1355,19 +1479,62 @@ class MT5BotSystem:
         return False
 
     def _calculate_dynamic_risk(self) -> float:
-        """Scale risk by intraday loss vs equity (anti-martingale), using config thresholds."""
+        """Scale risk down during drawdown and up only after positive conditions."""
         base_risk = float(getattr(self.strategy_cfg, "risk_per_trade", 0.005) or 0.005)
+        max_risk = float(getattr(self.strategy_cfg, "max_risk_per_trade", base_risk) or base_risk)
         summary = self.conn.get_account_summary() or {}
+        meta = self.trade_manager.meta or {}
         dd = self._daily_loss_fraction(summary)
         soft = float(getattr(self.strategy_cfg, "dynamic_risk_daily_dd_soft", 0.025) or 0.025)
         hard = float(getattr(self.strategy_cfg, "dynamic_risk_daily_dd_hard", 0.05) or 0.05)
         m_soft = float(getattr(self.strategy_cfg, "dynamic_risk_soft_multiplier", 0.88) or 0.88)
         m_hard = float(getattr(self.strategy_cfg, "dynamic_risk_hard_multiplier", 0.72) or 0.72)
+        risk = base_risk
+        reason = "base"
+
         if hard > 0 and dd >= hard:
-            return base_risk * m_hard
-        if soft > 0 and dd >= soft:
-            return base_risk * m_soft
-        return base_risk
+            risk = base_risk * m_hard
+            reason = "hard_drawdown"
+        elif soft > 0 and dd >= soft:
+            risk = base_risk * m_soft
+            reason = "soft_drawdown"
+        else:
+            boost_enabled = bool(getattr(self.strategy_cfg, "dynamic_risk_boost_enabled", True))
+            cp_active = bool(meta.get("capital_protection_active", False))
+            halted = bool(meta.get("halted", False))
+            if boost_enabled and not cp_active and not halted:
+                wins = int(meta.get("consecutive_wins", 0) or 0)
+                wins_needed = int(getattr(self.strategy_cfg, "dynamic_risk_boost_after_wins", 3) or 3)
+                min_gain = float(getattr(self.strategy_cfg, "dynamic_risk_boost_min_daily_gain", 0.01) or 0.01)
+                boost_mult = float(getattr(self.strategy_cfg, "dynamic_risk_boost_multiplier", 1.25) or 1.25)
+
+                eff = self._effective_balance(summary)
+                daily_start = float(meta.get("daily_start_eff") or eff or 0.0)
+                daily_gain = ((eff - daily_start) / daily_start) if daily_start > 0 else 0.0
+                streak_ok = wins_needed > 0 and wins >= wins_needed
+                gain_ok = min_gain > 0 and daily_gain >= min_gain
+
+                if streak_ok or gain_ok:
+                    risk = base_risk * max(1.0, boost_mult)
+                    reason = "boost_winning_streak" if streak_ok else "boost_daily_gain"
+
+        if max_risk > 0:
+            risk = min(risk, max_risk)
+        risk = max(0.0, float(risk))
+
+        current_pct = round(risk * 100.0, 4)
+        if (
+            meta.get("dynamic_risk_reason") != reason
+            or float(meta.get("dynamic_risk_current_pct", -1.0) or -1.0) != current_pct
+        ):
+            meta["dynamic_risk_reason"] = reason
+            meta["dynamic_risk_current_pct"] = current_pct
+            meta["dynamic_risk_base_pct"] = round(base_risk * 100.0, 4)
+            meta["dynamic_risk_max_pct"] = round(max_risk * 100.0, 4)
+            self.trade_manager.meta = meta
+            self.trade_manager.save()
+
+        return risk
 
     def _send_heartbeat(self) -> None:
         """Send a periodic 12-hour status heartbeat to Telegram."""
@@ -1553,20 +1720,33 @@ class MT5BotSystem:
             max_dd     = float(getattr(cfg, "max_drawdown",          0.15) or 0.15) * 100
             max_daily  = float(getattr(cfg, "max_daily_loss",        0.06) or 0.06) * 100
             max_open   = float(getattr(cfg, "max_total_open_risk",  0.075) or 0.075) * 100
+            max_trades = int(getattr(cfg, "max_open_trades", 3) or 3)
+            max_symbol = int(getattr(cfg, "max_open_trades_per_symbol", 1) or 1)
+            max_dir    = int(getattr(cfg, "max_open_trades_per_direction", 1) or 1)
+            opposite   = bool(getattr(cfg, "allow_opposite_direction_positions", False))
             streak_lim = int(getattr(cfg, "losing_streak_pause_after", 6) or 6)
             current_r  = self._calculate_dynamic_risk() * 100
             cp_r       = float(getattr(cfg, "cp_risk_fraction", 0.006) or 0.006) * 100
+            wins       = int(meta.get("consecutive_wins", 0) or 0)
+            boost_on   = bool(getattr(cfg, "dynamic_risk_boost_enabled", True))
+            boost_need = int(getattr(cfg, "dynamic_risk_boost_after_wins", 3) or 3)
+            boost_mult = float(getattr(cfg, "dynamic_risk_boost_multiplier", 1.25) or 1.25)
+            risk_state = str(meta.get("dynamic_risk_reason", "base") or "base")
             cp_status = f"🛡️ ACTIVE — {cp_r:.2f}% risk" if cp_active else "✅ Normal mode"
             return (
                 f"⚙️ RISK SETTINGS\n"
                 f"{'─'*24}\n"
                 f"Base risk/trade:    {base_r:.2f}%\n"
                 f"Current risk:       {current_r:.3f}% (dyn. adjusted)\n"
+                f"Risk state:         {risk_state}\n"
                 f"Max risk/trade:     {max_r:.2f}%\n"
                 f"Max daily loss:     {max_daily:.0f}%\n"
                 f"Max drawdown:       {max_dd:.0f}%\n"
                 f"Open risk limit:    {max_open:.1f}%\n"
+                f"Open trade slots:   {max_trades} total / {max_symbol} per symbol / {max_dir} per side\n"
+                f"Opposite-side hedge:{'allowed' if opposite else 'blocked'}\n"
                 f"Losing streak pause:{streak_lim} losses\n"
+                f"Risk boost:         {'ON' if boost_on else 'OFF'} ({wins}/{boost_need} wins, x{boost_mult:.2f})\n"
                 f"Capital Protection: {cp_status}"
             )
         except Exception as exc:

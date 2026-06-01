@@ -1,0 +1,8 @@
+-r requirements.txt
+MetaTrader5
+numpy
+requests
+python-telegram-bot==20.7
+tabulate
+matplotlib
+certifi>=2024.2.2

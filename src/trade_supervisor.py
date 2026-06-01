@@ -277,7 +277,13 @@ class TradeSupervisor:
         if not should_update:
             return
 
-        ok, _ = self.connection.validate_stops(symbol, price_for_validation, desired_sl, current_tp_value)
+        ok, _ = self.connection.validate_stops(
+            symbol,
+            price_for_validation,
+            desired_sl,
+            current_tp_value,
+            direction=t.direction,
+        )
         if not ok:
             return
 
