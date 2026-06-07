@@ -57,8 +57,13 @@ echo    All services started!
 echo.
 echo    Dashboard:    http://localhost:8501
 echo    Remote:       http://%COMPUTERNAME%:8501
+echo    Bot switch:   %DATA_DIR%\bot_switch.txt
 echo    Bot logs:     %LOG_DIR%\bot_run.log
 echo    Watchdog log: %LOG_DIR%\watchdog.log
 echo  ============================================
+echo.
+echo  Note: the dashboard always starts, but trading will only launch when:
+echo    - bot_switch.txt is ON
+echo    - market is open ^(Sun 21:00 UTC through Fri 21:00 UTC^)
 echo.
 pause

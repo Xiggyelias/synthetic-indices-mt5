@@ -11,6 +11,7 @@ set PYTHON=C:\Users\emmanuel\AppData\Local\Programs\Python\Python312\python.exe
 set LOG_DIR=%BOT_DIR%\logs
 set DATA_DIR=%BOT_DIR%\data
 set RESTART_DELAY=15
+set CLOSED_DELAY=300
 
 :: ── Ensure directories exist ─────────────────────────────────
 if not exist "%LOG_DIR%" mkdir "%LOG_DIR%"
@@ -25,10 +26,18 @@ echo [%date% %time%] Bot watchdog started >> "%LOG_DIR%\watchdog.log"
 echo  [%time%] Bot watchdog started. Logs → %LOG_DIR%\bot_run.log
 
 :loop
+cd /d "%BOT_DIR%"
+"%PYTHON%" scripts\watchdog_gate.py --switch-path "%DATA_DIR%\bot_switch.txt" --mode status > "%DATA_DIR%\watchdog_gate_status.txt"
+if errorlevel 1 (
+    set "GATE_STATUS=waiting"
+    echo [%date% %time%] Bot launch blocked. See %DATA_DIR%\watchdog_gate_status.txt >> "%LOG_DIR%\watchdog.log"
+    echo  [%time%] Bot launch blocked by switch or market status. Dashboard stays available.
+    timeout /T %CLOSED_DELAY% /NOBREAK > nul
+    goto loop
+)
+
 echo [%date% %time%] Starting bot... >> "%LOG_DIR%\watchdog.log"
 echo  [%time%] Starting MT5 bot (system mode)...
-
-cd /d "%BOT_DIR%"
 "%PYTHON%" mt5_bot.py --system --loop --confirm-trading >> "%LOG_DIR%\bot_run.log" 2>&1
 
 set EXIT_CODE=%ERRORLEVEL%
