@@ -1,264 +1,204 @@
-# ⚡ RSI-Pullback Engulfing Bot — v2.4
+# ⚡ QUANTA-SYNTH & QUANTUM BRAIN v2
 
-> **Institutional-grade algorithmic trading system for MetaTrader 5.**
-> H1 RSI-Pullback strategy on EURUSD & XAUUSD. 70%+ win-rate target. Full Telegram control. Live Streamlit dashboard.
-
----
-
-## 🎯 Strategy Overview
-
-The bot trades **high-probability engulfing candles at RSI pullbacks**, filtered by 8 confluence layers:
-
-| Layer | Rule |
-|-------|------|
-| **Trend** | Price above/below 200 EMA (dominant trend only) |
-| **RSI Pullback** | RSI dipped ≤45 (buy) or ≥55 (sell) within last 10 candles |
-| **Engulfing** | Body ≥40% of candle range — no doji engulfings |
-| **Volume** | ≥1.10× 20-period average (institutional conviction) |
-| **S/R Proximity** | Within 0.5% of a support or resistance level |
-| **Market Regime** | Skip entries in ranging/choppy conditions (ADX-based) |
-| **HTF Alignment** | D1 must agree with H1 trend direction |
-| **ADX** | ≥20 confirms directional market |
-
-**Expected performance:** 65–72% win rate · 1.4+ profit factor · 2–4 signals/week per symbol
+> **Autonomous Quantitative Trading & Statistical Edge Engine for Synthetic Volatility Indices**
+> Designed for 24/7/365 uninterrupted markets (Deriv & MetaTrader 5 Synthetic Indices). Zero central bank dependency. Pure mathematical edge.
 
 ---
 
-## 🚀 Key Features
+## 🌌 Overview
 
-### Strategy
-- **RSI-Pullback Engulfing** — buy dips (RSI ≤45) in uptrends, sell rallies (RSI ≥55) in downtrends
-- **Wilder's EWM RSI** — correct formula using `ewm(com=period-1, adjust=False)` (not simple MA)
-- **Multi-timeframe confirmation** — D1 trend must align with H1 signal
-- **12-signal confluence scoring** — EMA, RSI, MACD, Stochastic, Volume, S/R, ADX, Regime, HTF
+Unlike traditional forex and equities, **Synthetic Volatility Indices** operate 24/7/365 on continuous pseudo-random number generator (PRNG) algorithms with fixed calibrated volatilities (e.g., Volatility 10/25/50/75/100, Jump, and Step indices). They are immune to macroeconomic news releases, weekend gaps, and central bank surprises.
 
-### Risk Management
-- **1% risk per trade** (configurable), 2% max
-- **Max 3 open trades** simultaneously
-- **6% daily loss limit**, 15% overall drawdown limit
-- **Capital Protection Mode** — reduces risk to 0.6% after 6 consecutive losses
-- **Dynamic risk scaling** — 82% risk in volatile regimes, 75% near hard daily limit
-- **Margin safety gate** — skips trades if margin level < 200%
+This repository hosts a two-tier quantitative trading ecosystem:
 
-### Trade Management (TradeSupervisor)
-- **Breakeven at 1R** — SL moves to entry once price extends 1R
-- **1.5R partial close** — 50% of position closed at 1.5R, remainder runs
-- **Swing-based trailing** — after partial close, SL trails to fractal swing lows/highs
-- **Structure invalidation** — auto-exits if price closes through recent swing level against trade
-
-### Execution Quality
-- **ATR-relative spread check** — blocks entry if spread > 15% of ATR (scales for both EURUSD and XAUUSD)
-- **Max slippage**: 10 points
-- **Losing streak pause** — 45-minute cooldown after 6 consecutive losses
-
-### Infrastructure
-- **Live Streamlit dashboard** — real-time scanner feed, equity curve, regime status
-- **Full Telegram control** — 11 commands, inline keyboard, two-way conversation
-- **MySQL + JSON fallback** — state persists across restarts
-- **SSL-secured** Telegram API calls
-- **Graceful shutdown** on SIGTERM/SIGINT
-- **Exponential backoff** on MT5 reconnect
+1. **QUANTA-SYNTH (`synthetic_bot.py`)**: Autonomous MetaTrader 5 execution engine with dynamic regime detection, statistical volatility breakout/pullback models, adaptive calibration, and institutional risk management.
+2. **QUANTUM BRAIN v2 (`quantum_brain.py` & `src/qb2/`)**: Research-grade statistical edge engine featuring high-frequency tick ingestion, walk-forward model validation, feature drift monitoring, contract-aware backtesting, and isolated demo execution.
 
 ---
 
-## 📁 Project Structure
+## 🏛️ System Architecture
 
 ```
 files (1)/
-├── src/
-│   ├── mt5_system.py              # Main orchestrator & Telegram commands
-│   ├── trading_bot_engulfing_v2.py # Strategy logic & confluence scoring
-│   ├── trade_supervisor.py        # Position management (BE, trail, partial)
-│   ├── trade_manager.py           # State persistence layer
-│   ├── mt5_connection.py          # MT5 API wrapper
-│   ├── telegram_notifier.py       # Two-way Telegram interface
-│   ├── market_regime.py           # RegimeClassifier (ADX/ATR/BB)
-│   ├── news_filter.py             # Economic calendar block
-│   ├── performance_tracker.py     # Trade analytics
-│   └── trade_journal.py           # Detailed trade logging
+├── synthetic_bot.py                 # QUANTA-SYNTH main entry point
+├── quantum_brain.py                 # QUANTUM BRAIN v2 CLI orchestrator
+├── dashboard.py                     # Unified Streamlit entry point
+├── dashboard_synthetic.py           # QUANTA-SYNTH institutional control center
+├── dashboard_quantum.py             # QUANTUM BRAIN research & model matrix
+│
 ├── config/
-│   └── config_rsi_pullback.json   # All strategy parameters (v2.4)
-├── data/
-│   ├── bot_switch.txt             # on/off switch (hot-reload)
-│   ├── trades_state.json          # Live trade state
-│   ├── performance_state.json     # Closed trade history
-│   └── trade_journal.json         # Full trade journal
+│   ├── config_synthetic.json        # Strategy & risk parameters for MT5 synthetic bot
+│   └── config_quantum.json          # Calibration, tick, and drift settings for QB2
+│
+├── src/
+│   ├── synthetic_bot_system.py      # Core execution orchestrator & lifecycle
+│   ├── synthetic_strategy.py        # Volatility regime, breakout & momentum models
+│   ├── synthetic_risk_manager.py    # Dynamic ATR position sizing & equity circuit breakers
+│   ├── synthetic_calibration.py     # Parameter adaptation & statistical deviation checks
+│   ├── synthetic_backtester.py      # Bar-by-bar historical backtest simulation
+│   ├── quant_brain.py               # Core quant decision engine
+│   ├── edge_scanner.py              # Statistical anomaly & edge scanner
+│   ├── mt5_connection.py            # Resilient MT5 wrapper with exponential backoff
+│   ├── telegram_notifier.py         # Real-time Telegram alerts & execution reports
+│   │
+│   └── qb2/                         # Modular Quantum Brain v2 Engine
+│       ├── collector.py             # Tick collection and live proposal ingestion
+│       ├── data_quality.py          # Missing tick & data health auditor
+│       ├── decision.py              # Rule-based and model-based decision matrix
+│       ├── demo_executor.py         # Isolated demo execution harness
+│       ├── deriv_client.py          # WebSocket client for Deriv API
+│       ├── drift.py                 # Population stability index (PSI) & feature drift
+│       ├── features.py              # Microstructure & return feature extraction
+│       ├── labels.py                # Fixed-horizon & barrier label generators
+│       ├── models.py                # Classifier and probabilistic edge models
+│       ├── patterns.py              # Candlestick and tick pattern extractors
+│       ├── pipeline.py              # End-to-end training and feature pipeline
+│       ├── regime.py                # Volatility state classifier
+│       ├── registry.py              # Model artifact registry (champion/candidate)
+│       ├── research.py              # Cross-instrument edge discovery & ranking
+│       ├── risk_governor.py         # Drawdown latching and contract-level risk gate
+│       ├── storage.py               # SQLite research database (`qb.db`)
+│       ├── ticks.py                 # Tick buffer and resampler
+│       ├── trader.py                # Live/paper trade loop coordinator
+│       └── validation.py            # Combinatorial & walk-forward validator
+│
 ├── scripts/
-│   ├── start_bot.bat              # Launch bot + dashboards
-│   ├── install_mysql.bat          # MySQL setup
-│   └── check_bot_status.py        # CLI status check
-├── logs/
-│   └── bot_run.log                # Rotating log (all activity)
+│   ├── start_synthetic_bot.bat       # Launch autonomous MT5 synthetic bot
+│   ├── start_synthetic_dashboard.bat # Launch QUANTA-SYNTH Streamlit UI (Port 8501)
+│   ├── start_quantum_dashboard.bat   # Launch Quantum Brain UI (Port 8502)
+│   └── bot_runtime_control.py       # Hot-reload switch & runtime management
+│
+├── tests/
+│   ├── test_synthetic_brain.py      # Comprehensive tests for synthetic system
+│   ├── test_qb2_core.py             # QB2 core module test suite
+│   ├── test_qb2_research.py         # QB2 research & feature pipeline tests
+│   └── test_qb2_trading.py          # QB2 execution, paper & demo trade tests
+│
 ├── docs/
-│   ├── VPS_SETUP_GUIDE.md
-│   ├── DEPLOYMENT_CHECKLIST.md
-│   ├── GO_NO_GO_EVALUATION.md
-│   └── FORWARD_TEST_CHECKLIST.md
-├── dashboard.py                   # Streamlit dashboard
-├── mt5_bot.py                     # Entry point
-├── .env                           # Credentials (never commit)
-└── requirements.txt
+│   └── QUANTUM_BRAIN_V2.md          # Full architectural specification of QB2
+│
+├── requirements.txt                 # Core dependencies
+└── requirements-bot.txt             # MT5 & Telegram runtime dependencies
 ```
 
 ---
 
-## 📱 Telegram Commands
+## ⚡ Quick Start
 
-Send any of these to your bot. Inline keyboard auto-appears for unrecognised input.
+### 1. Environment Configuration
 
-| Command | Alias | Description |
-|---------|-------|-------------|
-| `/status` | | Full account snapshot, bot health, daily P&L |
-| `/balance` | | Account balance, equity, margin level |
-| `/positions` | | All open trades with entry/SL/TP/BE status |
-| `/report` | | Equity curve chart image + stats |
-| `/stop` | `/pause` | Pause all trading immediately |
-| `/start` | `/resume` | Resume signal scanning |
-| `/risk` | | Current risk mode, capital protection status |
-| `/help` | `/menu` | Interactive keyboard menu |
+Copy the sample environment file for your desired runtime:
 
----
-
-## 🛠️ Getting Started
-
-### 1. Requirements
 ```bash
-# Dashboard only / Streamlit Community Cloud
-pip install -r requirements.txt
+# For QUANTA-SYNTH (MetaTrader 5):
+copy .env.synthetic.example .env
 
-# Full Windows/VPS bot with MetaTrader 5
+# For QUANTUM BRAIN v2 (Deriv API):
+copy .env.quantum.example .env
+```
+
+Fill in your MT5 account credentials or Deriv API token inside `.env`.
+
+### 2. Installing Dependencies
+
+```bash
 pip install -r requirements-bot.txt
 ```
 
-### 2. Configure `.env`
-```env
-# MetaTrader 5
-MT5_LOGIN=your_account_number
-MT5_PASSWORD=your_password
-MT5_SERVER=your_broker_server
-MT5_DEMO=true
-
-# Telegram
-TELEGRAM_BOT_TOKEN=your_bot_token
-TELEGRAM_CHAT_ID=your_chat_id
-
-# Optional: MySQL
-DB_HOST=127.0.0.1
-DB_PORT=3306
-DB_NAME=trading_bot
-DB_USER=root
-DB_PASSWORD=your_password
-```
-
-### 3. Launch
-```powershell
-# Full stack (bot + both dashboards)
-.\scripts\start_bot.bat
-
-# Bot only
-python mt5_bot.py --system --loop --confirm-trading
-
-# Dashboard only
-streamlit run dashboard.py --server.port 8502
-```
-
-### 4. Dashboard
-Open `http://localhost:8502` in your browser.
-
-- **🔴 Live Scanner** tab — real-time regime status, activity feed, open positions
-- **📊 Overview** — equity curve, KPIs
-- **📈 Performance** — win rate, R-multiples, session breakdown
-
 ---
 
-## ⚙️ Configuration
+## 🚀 Running QUANTA-SYNTH (MetaTrader 5)
 
-All parameters live in `config/config_rsi_pullback.json`. Key values:
-
-```json
-"rsi_settings": {
-    "rsi_pullback_buy_threshold":  45,
-    "rsi_pullback_sell_threshold": 55,
-    "rsi_lookback_candles":        10
-},
-"volume_settings": {
-    "volume_multiplier": 1.10
-},
-"risk_management": {
-    "risk_per_trade":   0.01,
-    "max_daily_loss":   0.06,
-    "max_drawdown":     0.15,
-    "max_open_trades":  3
-}
-```
-
-Hot-reload: edit the JSON while the bot runs — changes apply on the next scan cycle.
-
----
-
-## Free Streamlit Community Cloud Deployment
-
-Use this for the public dashboard only. The live MT5 trading process still needs a Windows machine or Windows VPS with the MetaTrader 5 terminal installed and logged in.
-
-1. Push this repo to GitHub.
-2. Go to `https://share.streamlit.io` and choose **Streamlit Community Cloud**.
-3. Select the repository and branch.
-4. Set the main file path to `dashboard.py`.
-5. In Advanced settings, add this secret/environment value:
-   ```toml
-   CLOUD_DASHBOARD = "true"
-   ```
-6. Click **Deploy**.
-
-Community Cloud will install `requirements.txt`, which intentionally excludes `MetaTrader5` because the cloud dashboard runs on Linux. For the actual trading bot, install `requirements-bot.txt` on Windows/VPS.
-
----
-
-## 🌐 VPS Deployment
-
-See `docs/VPS_SETUP_GUIDE.md` for full VPS instructions.
-
-**Quick steps:**
-1. RDP into Windows VPS
-2. Install Python 3.12, MetaTrader 5, MT5 Python package
-3. Clone/copy project to `C:\TradingBot\`
-4. Install NSSM: `choco install nssm`
-5. Register as service: `nssm install TradingBot python mt5_bot.py --system --loop --confirm-trading`
-6. `nssm start TradingBot`
-
----
-
-## 📊 Production Readiness Status
-
-| Category | Status | Notes |
-|----------|--------|-------|
-| Strategy logic | ✅ Ready | Wilder RSI, ATR spread, ADX, margin gate |
-| Risk management | ✅ Ready | Daily/drawdown limits, capital protection |
-| Trade management | ✅ Ready | BE, trail, partial close, structure exit |
-| Telegram interface | ✅ Ready | 11 commands, inline keyboard |
-| Dashboard | ✅ Ready | Live scanner, equity curve, performance |
-| State persistence | ✅ Ready | JSON (MySQL optional) |
-| Error handling | ✅ Ready | Graceful shutdown, reconnect backoff |
-| **Demo tested** | ⏳ In progress | Running on demo — awaiting 30+ trades |
-| **MySQL** | ⚠️ Optional | Bot runs on JSON fallback without it |
-| **NSSM service** | ⚠️ Recommended | For 24/7 auto-restart on VPS |
-| **Forward test** | ⏳ Needed | 30+ live demo trades required before going live |
-
----
-
-## 🧠 Quantum Brain v2 (Deriv Volatility Indices, Rise/Fall research)
-
-A separate research and decision system for five-minute Rise/Fall contracts on Deriv
-Volatility Indices: Deriv WebSocket data collection, contract-aware labels, walk-forward
-validation with purging and a protected holdout, a deterministic risk governor, a model
-registry that needs human approval, and a read-only dashboard. It defaults to paper mode
-and has no real-money mode. See [docs/QUANTUM_BRAIN_V2.md](docs/QUANTUM_BRAIN_V2.md).
+### Command Line Interface
 
 ```bash
-python quantum_brain.py migrate && python quantum_brain.py discover
-streamlit run dashboard_quantum.py
+# Start 24/7 autonomous loop across configured synthetic symbols
+python synthetic_bot.py --run
+
+# Scan and rank all configured synthetic markets
+python synthetic_bot.py --scan
+
+# Run statistical edge scan on historical MT5 bars
+python synthetic_bot.py --edge-scan --bars 20000
+
+# Run bar-by-bar backtest on a specific index
+python synthetic_bot.py --backtest "Volatility 75 Index" --bars 5000 --timeframe M5
+
+# Show mathematical PRNG formulas for all synthetic indices
+python synthetic_bot.py --math-formulas
 ```
 
-## ⚠️ Disclaimer
+### Windows Batch Launcher
+Double-click or run:
+```cmd
+scripts\start_synthetic_bot.bat
+```
 
-Trading involves significant risk of loss. This software is provided for educational and research purposes. Always test thoroughly on a demo account before considering any live deployment. Past performance does not guarantee future results.
+### Live Streamlit Dashboard
+```cmd
+scripts\start_synthetic_dashboard.bat
+# Access at http://localhost:8501
+```
+
+---
+
+## 🧠 Running QUANTUM BRAIN v2
+
+QUANTUM BRAIN operates against the Deriv API via WebSocket:
+
+```bash
+# 1. Initialize or migrate the local SQLite research database
+python quantum_brain.py migrate
+
+# 2. Discover available Volatility Indices and contracts
+python quantum_brain.py discover
+
+# 3. Ingest historical tick data
+python quantum_brain.py backfill --symbols "R_100,R_75" --count 50000
+
+# 4. Run data quality check
+python quantum_brain.py quality
+
+# 5. Conduct statistical edge research and ranking
+python quantum_brain.py research
+
+# 6. Walk-forward contract-aware backtest
+python quantum_brain.py backtest --symbol R_100
+
+# 7. Start paper trading loop
+python quantum_brain.py paper
+```
+
+### Quantum Brain Research Dashboard
+```cmd
+scripts\start_quantum_dashboard.bat
+# Access at http://localhost:8502
+```
+
+---
+
+## 🛡️ Risk Management & Safety Gates
+
+* **Zero Weekend Risk**: Synthetic markets trade 24/7 without weekend gap risk or session rollover spikes.
+* **Volatility-Adjusted Position Sizing**: All position sizes scale dynamically using instantaneous ATR and localized variance.
+* **Capital Protection**:
+  * Hard daily loss limit (configurable in `config_synthetic.json`).
+  * Drawdown circuit breakers automatically pause execution if equity drops past threshold.
+  * Losing streak cooling period with dynamic risk reduction.
+* **Model Drift Sentinel**: Quantum Brain v2 monitors Population Stability Index (PSI) and feature distributions in real time; execution halts if model drift is detected.
+
+---
+
+## 🧪 Running the Test Suite
+
+The entire synthetic test suite runs under `pytest`:
+
+```bash
+pytest tests/test_synthetic_brain.py tests/test_qb2_core.py tests/test_qb2_research.py tests/test_qb2_trading.py -v
+```
+
+All 121 tests cover:
+* Synthetic strategy indicators and signal generation
+* Mathematical edge detection and calibration
+* Tick buffer processing, feature pipelines, and label generation
+* Risk governor latching and trade execution safety
