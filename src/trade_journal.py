@@ -12,21 +12,13 @@ import logging
 import os
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
-from typing import Dict, List, Optional, Any
-from enum import Enum
+from typing import Dict, List, Optional
 
 try:
     from database import DatabaseManager
     _DB_MODULE_OK = True
 except ImportError:
     _DB_MODULE_OK = False
-
-
-class TradeOutcome(Enum):
-    WIN = "WIN"
-    LOSS = "LOSS"
-    BREAKEVEN = "BREAKEVEN"
-    PARTIAL = "PARTIAL"
 
 
 @dataclass
@@ -338,42 +330,3 @@ Ticket: {entry.ticket}
 """
         return summary.strip()
     
-    def get_recent_lessons(self, count: int = 5) -> List[str]:
-        """Get recent lessons learned"""
-        lessons = []
-        for entry in reversed(self.entries):
-            if entry.lesson_learned:
-                lessons.append(f"• {entry.outcome} ({entry.symbol}): {entry.lesson_learned}")
-            if len(lessons) >= count:
-                break
-        return lessons
-    
-    def get_common_mistakes(self) -> Dict[str, int]:
-        """Analyze common mistakes from losing trades"""
-        mistakes = {}
-        for entry in self.entries:
-            if entry.outcome == "LOSS" and entry.what_went_wrong:
-                # Simple keyword extraction
-                words = entry.what_went_wrong.lower().split()
-                for word in words:
-                    if len(word) > 4:  # Skip short words
-                        mistakes[word] = mistakes.get(word, 0) + 1
-        return dict(sorted(mistakes.items(), key=lambda x: -x[1])[:10])
-    
-    def get_setup_performance(self) -> Dict[str, Dict]:
-        """Analyze performance by setup type"""
-        stats = {}
-        for entry in self.entries:
-            setup = entry.setup_type or "unknown"
-            if setup not in stats:
-                stats[setup] = {"trades": 0, "wins": 0, "total_r": 0.0}
-            stats[setup]["trades"] += 1
-            if entry.outcome in ("WIN", "PARTIAL"):
-                stats[setup]["wins"] += 1
-            stats[setup]["total_r"] += entry.r_achieved
-        
-        for setup, s in stats.items():
-            s["win_rate"] = s["wins"] / s["trades"] * 100 if s["trades"] > 0 else 0
-            s["avg_r"] = s["total_r"] / s["trades"] if s["trades"] > 0 else 0
-        
-        return stats

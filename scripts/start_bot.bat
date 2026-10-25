@@ -18,8 +18,7 @@ if not exist .env (
 :: call venv\Scripts\activate
 
 :: Start the bot
-:: Redirecting to NUL because the bot now handles its own log rotation internally
-python mt5_bot.py --system --symbols EURUSD XAUUSD --timeframe H4 --confirm-trading
+python mt5_bot.py --system --loop --confirm-trading
 
 if %errorlevel% neq 0 (
     echo [CRITICAL] Bot crashed or stopped with error.

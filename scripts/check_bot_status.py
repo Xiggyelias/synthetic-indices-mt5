@@ -8,8 +8,6 @@ import os
 import sys
 import json
 import psutil
-import pandas as pd
-from datetime import datetime
 try:
     from tabulate import tabulate
 except ImportError:
@@ -39,29 +37,16 @@ def check_process():
 
 def get_latest_logs(n=10):
     """Get the last N lines of the log file."""
-    log_path = "logs/bot_run.err"
-    if not os.path.exists(log_path):
-        return "Log file not found."
-    
-    with open(log_path, 'r', encoding='utf-16le', errors='replace') as f:
-        lines = f.readlines()
-        return "".join(lines[-n:])
-
-def get_trades_status():
-    """Read the current trades state."""
-    state_path = "data/trades_state.json"
-    if not os.path.exists(state_path):
-        return "State file not found."
-    
-    with open(state_path, 'r') as f:
-        state = json.load(f)
-    
-    trades = state.get('trades', [])
-    if not trades:
-        return "No trades recorded."
-    
-    df = pd.DataFrame(trades)
-    return df
+    for log_path, enc in [("logs/bot_run.log", "utf-8"), ("logs/bot_run.err", "utf-8"), ("logs/bot_run.err", "utf-16le")]:
+        if os.path.exists(log_path) and os.path.getsize(log_path) > 0:
+            try:
+                with open(log_path, 'r', encoding=enc, errors='replace') as f:
+                    lines = f.readlines()
+                    if lines:
+                        return "".join(lines[-n:])
+            except Exception:
+                continue
+    return "No recent log activity."
 
 def main():
     if hasattr(sys.stdout, 'reconfigure'):

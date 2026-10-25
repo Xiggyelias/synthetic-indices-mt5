@@ -11,6 +11,7 @@
     "capital_allocation": 0.0,
     "max_risk_per_trade": 0.02,
     "max_total_open_risk": 0.075,
+    "max_net_currency_risk": 0.025,
     "max_daily_loss": 0.06,
     "max_open_trades": 3,
     "max_open_trades_per_symbol": 2,
@@ -84,7 +85,16 @@
 
     "execution": {
       "max_spread_points": 0,
-      "max_slippage_points": 10
+      "max_slippage_points": 10,
+      "stagnation_bars": 10
+    }
+  },
+
+  "symbol_overrides": {
+    "XAUUSD": {
+      "enabled": false,
+      "allowed_directions": [],
+      "notes": "Disabled after 2-year H1 backtest showed negative expectancy and profit factor below 1. Re-enable only after separate XAUUSD tuning validates a positive edge."
     }
   },
 

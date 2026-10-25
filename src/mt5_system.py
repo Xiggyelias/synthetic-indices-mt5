@@ -7,9 +7,11 @@ import signal
 import subprocess
 import sys
 import time
+import re
+from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
-from typing import Optional
+from typing import Any, Optional
 
 import pandas as pd
 try:
@@ -51,19 +53,60 @@ class SystemConfig:
     bot_switch_path: str = "data/bot_switch.txt"
 
 
-def load_trading_config_from_json(path: str) -> TradingConfig:
+def _deep_merge_dict(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+    merged = dict(base)
+    for key, value in override.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _deep_merge_dict(merged[key], value)
+        else:
+            merged[key] = value
+    return merged
+
+
+def _config_raw_for_symbol(raw: dict[str, Any], symbol: str = "") -> dict[str, Any]:
+    symbol_key = str(symbol or "").strip().upper()
+    overrides = raw.get("symbol_overrides") or {}
+    if not symbol_key or not isinstance(overrides, dict):
+        return raw
+
+    override = overrides.get(symbol_key)
+    if override is None:
+        for key, value in overrides.items():
+            if str(key).strip().upper() == symbol_key:
+                override = value
+                break
+
+    if not isinstance(override, dict):
+        return raw
+
+    merged = _deep_merge_dict(raw, override)
+    merged.pop("symbol_overrides", None)
+    return merged
+
+
+def load_trading_config_from_json(path: str, symbol: str = "") -> TradingConfig:
     cfg = TradingConfig()
     if not path or not os.path.exists(path):
         return cfg
 
     with open(path, "r", encoding="utf-8") as f:
         raw = json.load(f) or {}
+    raw = _config_raw_for_symbol(raw, symbol)
 
     rm = (raw.get("risk_management") or {})
     sp = (raw.get("strategy_parameters") or {})
     rsi = (sp.get("rsi_settings") or {})
     vol = (sp.get("volume_settings") or {})
     sr = (sp.get("support_resistance") or {})
+
+    if "enabled" in raw:
+        cfg.enabled = bool(raw.get("enabled"))
+    if "allowed_directions" in raw and isinstance(raw.get("allowed_directions"), list):
+        cfg.allowed_directions = [
+            str(direction).strip().lower()
+            for direction in raw.get("allowed_directions")
+            if str(direction).strip()
+        ]
 
     if "risk_per_trade" in rm:
         cfg.risk_per_trade = float(rm.get("risk_per_trade"))
@@ -77,6 +120,8 @@ def load_trading_config_from_json(path: str) -> TradingConfig:
         cfg.max_risk_per_trade = float(rm.get("max_risk_per_trade") or cfg.max_risk_per_trade)
     if "max_total_open_risk" in rm:
         cfg.max_total_open_risk = float(rm.get("max_total_open_risk") or cfg.max_total_open_risk)
+    if "max_net_currency_risk" in rm:
+        cfg.max_net_currency_risk = float(rm.get("max_net_currency_risk") or cfg.max_net_currency_risk)
     if "max_open_trades" in rm:
         cfg.max_open_trades = int(rm.get("max_open_trades") or cfg.max_open_trades)
     if "max_open_trades_per_symbol" in rm:
@@ -155,8 +200,8 @@ def load_trading_config_from_json(path: str) -> TradingConfig:
     cfg.rsi_pullback_sell_threshold = float(rsi.get("rsi_pullback_sell_threshold", cfg.rsi_pullback_sell_threshold))
     cfg.rsi_lookback_candles = int(rsi.get("rsi_lookback_candles", cfg.rsi_lookback_candles))
 
-    cfg.volume_multiplier = float(vol.get("volume_multiplier", cfg.volume_multiplier))
-    cfg.volume_period = int(vol.get("volume_period", cfg.volume_period))
+    cfg.volume_multiplier = float(vol.get("volume_multiplier", sp.get("volume_multiplier", cfg.volume_multiplier)))
+    cfg.volume_period = int(vol.get("volume_period", sp.get("volume_period", cfg.volume_period)))
 
     execution = (sp.get("execution") or {})
     if "max_spread_points" in execution:
@@ -167,6 +212,8 @@ def load_trading_config_from_json(path: str) -> TradingConfig:
         cfg.friday_close_enabled = bool(execution.get("friday_close_enabled"))
     if "friday_close_hour_utc" in execution:
         cfg.friday_close_hour_utc = int(float(execution.get("friday_close_hour_utc") or cfg.friday_close_hour_utc))
+    if "stagnation_bars" in execution:
+        cfg.stagnation_bars = int(float(execution.get("stagnation_bars") or cfg.stagnation_bars))
 
     cfg.sr_lookback = int(sr.get("sr_lookback", cfg.sr_lookback))
     cfg.sr_tolerance = float(sr.get("sr_tolerance", cfg.sr_tolerance))
@@ -192,35 +239,6 @@ def load_trading_config_from_json(path: str) -> TradingConfig:
     return cfg
 
 
-def compute_volume_from_risk(conn: MT5Connection, symbol: str, entry: float, sl: float, risk_fraction: float) -> Optional[float]:
-    rules = conn.get_broker_rules(symbol)
-    if rules is None:
-        return None
-
-    summary = conn.get_account_summary() or {}
-    balance = float(summary.get("balance") or 0.0)
-    if balance <= 0:
-        return None
-
-    risk_amount = balance * float(risk_fraction)
-    price_risk = abs(float(entry) - float(sl))
-    if price_risk <= 0:
-        return None
-
-    tick_size = float(getattr(rules, "tick_size", 0.0) or 0.0)
-    tick_value = float(getattr(rules, "tick_value", 0.0) or 0.0)
-    if tick_size <= 0 or tick_value <= 0:
-        return None
-
-    value_per_price_unit = tick_value / tick_size
-    risk_per_lot = price_risk * value_per_price_unit
-    if risk_per_lot <= 0:
-        return None
-
-    raw_vol = risk_amount / risk_per_lot
-    return conn.normalize_volume(symbol, raw_vol)
-
-
 class MT5BotSystem:
     def __init__(self, conn: MT5Connection, system_cfg: SystemConfig) -> None:
         self.conn = conn
@@ -235,6 +253,14 @@ class MT5BotSystem:
         self.news = NewsFilter(build_news_config_from_env(os.getenv))
         
         self.strategy_cfg = load_trading_config_from_json(system_cfg.config_json_path)
+        self.strategy_cfg_by_symbol = {
+            str(symbol).upper(): load_trading_config_from_json(system_cfg.config_json_path, symbol=symbol)
+            for symbol in system_cfg.symbols
+        }
+        self.strategy_by_symbol = {
+            symbol: EngulfingBotV2(cfg)
+            for symbol, cfg in self.strategy_cfg_by_symbol.items()
+        }
         self.supervisor = TradeSupervisor(
             conn,
             self.trade_manager,
@@ -248,6 +274,11 @@ class MT5BotSystem:
         self._losing_streak_limit = max(1, int(getattr(self.strategy_cfg, "losing_streak_pause_after", 5) or 5))
         self.strategy = EngulfingBotV2(self.strategy_cfg)
         self.regime_classifier = RegimeClassifier(atr_multiplier=2.0)
+        self._config_mtime: Optional[float] = (
+            os.path.getmtime(system_cfg.config_json_path)
+            if os.path.exists(system_cfg.config_json_path)
+            else None
+        )
         
         # Performance tracking
         self.performance = PerformanceTracker(state_path="data/performance_state.json")
@@ -263,11 +294,36 @@ class MT5BotSystem:
         self._losing_streak_paused: bool = bool((self.trade_manager.meta or {}).get("losing_streak_paused_at"))
         self._losing_streak_limit: int = max(1, int(getattr(self.strategy_cfg, "losing_streak_pause_after", 5) or 5))
         self._last_heartbeat: float = 0
-        self._last_conn_check: float = time.time()
         self._conn_fail_count: int = 0
         self._last_performance_review_count: int = 0
         self._market_status_last: dict[str, str] = {}
         self._setup_commands()
+
+    def _reload_config_if_modified(self) -> None:
+        path = self.system_cfg.config_json_path
+        if not path or not os.path.exists(path):
+            return
+        try:
+            mtime = os.path.getmtime(path)
+            if self._config_mtime is not None and mtime <= self._config_mtime:
+                return
+            self._config_mtime = mtime
+            self.strategy_cfg = load_trading_config_from_json(path)
+            self.strategy_cfg_by_symbol = {
+                str(symbol).upper(): load_trading_config_from_json(path, symbol=symbol)
+                for symbol in self.system_cfg.symbols
+            }
+            self.strategy_by_symbol = {
+                symbol: EngulfingBotV2(cfg)
+                for symbol, cfg in self.strategy_cfg_by_symbol.items()
+            }
+            self.strategy = EngulfingBotV2(self.strategy_cfg)
+            if hasattr(self, "supervisor") and self.supervisor:
+                self.supervisor.config = self.strategy_cfg
+            self._losing_streak_limit = max(1, int(getattr(self.strategy_cfg, "losing_streak_pause_after", 5) or 5))
+            self.logger.info("Config hot-reload successful from %s (mtime=%.0f)", path, mtime)
+        except Exception as exc:
+            self.logger.warning("Config hot-reload failed: %s", exc)
 
     def _effective_balance(self, summary: dict) -> float:
         bal = float(summary.get("balance") or 0.0)
@@ -1091,10 +1147,17 @@ class MT5BotSystem:
         self.notifier.send(msg)
 
     def evaluate_and_trade(self, symbol: str) -> None:
+        symbol_key = str(symbol).upper()
+        strategy_cfg = self.strategy_cfg_by_symbol.get(symbol_key, self.strategy_cfg)
+        strategy = self.strategy_by_symbol.get(symbol_key, self.strategy)
+        if not bool(getattr(strategy_cfg, "enabled", True)):
+            self.logger.info("[EVAL_%s] SYMBOL_DISABLED: disabled by config", symbol)
+            return
+
         # Friday Close Logic
-        if self.strategy_cfg.friday_close_enabled:
+        if strategy_cfg.friday_close_enabled:
             now_utc = datetime.now(timezone.utc)
-            if now_utc.weekday() == 4 and now_utc.hour >= self.strategy_cfg.friday_close_hour_utc:
+            if now_utc.weekday() == 4 and now_utc.hour >= strategy_cfg.friday_close_hour_utc:
                 if self._has_open_position(symbol):
                     self.logger.warning("Friday Close active: closing all positions for %s", symbol)
                     self.notifier.send(f"⚠️ Friday Close active: closing all positions for {symbol} to avoid weekend gap risk.")
@@ -1107,30 +1170,51 @@ class MT5BotSystem:
         if df is None or len(df) < 250:
             self.logger.debug("[EVAL_%s] Data check blocked: df_len=%s", symbol, len(df) if df is not None else None)
             return
-        df = self.strategy.calculate_indicators(df)
+        df = strategy.calculate_indicators(df)
 
         idx = len(df) - 2
         candle_time = str(df.index[idx].isoformat())
         
-        # HTF Trend Check (D1) — gate early, before any heavy computation
+        # Validate candle setup FIRST before heavy macro/news checks
+        is_bullish_signal = strategy.is_bullish_engulfing(df, idx)
+        is_bearish_signal = strategy.is_bearish_engulfing(df, idx)
+        if not (is_bullish_signal or is_bearish_signal) or not strategy.check_min_body_size(df, idx):
+            if market_open_for_scan:
+                self._clear_pending_closed_market_signal(symbol)
+            return
+
+        candidate_signal = Signal.BUY if is_bullish_signal else Signal.SELL
+        allowed_dirs = {
+            str(d).strip().lower()
+            for d in getattr(strategy_cfg, "allowed_directions", ["buy", "sell"])
+        }
+        if candidate_signal == Signal.BUY and "buy" not in allowed_dirs:
+            return
+        if candidate_signal == Signal.SELL and "sell" not in allowed_dirs:
+            return
+
+        # HTF Trend Check (D1) aligned with candidate signal direction
         htf_trend_aligned = True
         mtf_df = self.conn.get_rates(symbol, "D1", count=100)
         if mtf_df is not None:
             mtf_df = pd.DataFrame(mtf_df)
-            is_bullish_signal = self.strategy.is_bullish_engulfing(df, idx)
-            htf_trend_aligned = self.strategy.check_mtf_trend(mtf_df, Signal.BUY if is_bullish_signal else Signal.SELL)
+            htf_trend_aligned = strategy.check_mtf_trend(mtf_df, candidate_signal)
 
         if not htf_trend_aligned:
             if market_open_for_scan:
                 self._clear_pending_closed_market_signal(symbol)
-            self.logger.info("[EVAL_%s] HTF_TREND_MISMATCH: D1 trend not aligned with H1 signal", symbol)
-            return  # fast-exit: no point running regime + signal if D1 disagrees
+            self.logger.info(
+                "[EVAL_%s] HTF_TREND_MISMATCH: D1 trend not aligned with H1 %s signal",
+                symbol,
+                candidate_signal.name,
+            )
+            return
 
         # Macro Context & Session Checks
         is_london_ny = self._is_london_ny_session()
 
         # News filter — cache result (single network call; used for both regime + news gate)
-        self.news.config.avoid_minutes = 120
+        self.news.config.avoid_minutes = int(self.system_cfg.avoid_news_minutes or 60)
         news_blocked, news_reason = self.news.is_blocked(symbol)
 
         self.logger.info(
@@ -1142,7 +1226,7 @@ class MT5BotSystem:
         regime = self.regime_classifier.classify(df, news_blocked)
         self.logger.info("[EVAL_%s] REGIME_CLASSIFIED: regime=%s | news_blocked=%s", symbol, regime.value, news_blocked)
         
-        if bool(getattr(self.strategy_cfg, "skip_weak_range_entries", False)) and regime == MarketRegime.RANGING:
+        if bool(getattr(strategy_cfg, "skip_weak_range_entries", False)) and regime == MarketRegime.RANGING:
             if market_open_for_scan:
                 self._clear_pending_closed_market_signal(symbol)
             self.logger.info("[EVAL_%s] SKIP_WEAK_RANGE: ranging chop filter enabled", symbol)
@@ -1152,7 +1236,7 @@ class MT5BotSystem:
         meta = self.trade_manager.meta or {}
         is_cp_active = bool(meta.get("capital_protection_active", False))
         if is_cp_active:
-            cp_max_day = int(getattr(self.strategy_cfg, "cp_max_trades_per_day", 4) or 4)
+            cp_max_day = int(getattr(strategy_cfg, "cp_max_trades_per_day", 4) or 4)
             if meta.get("cp_daily_trades", 0) >= cp_max_day:
                 self.logger.info("[EVAL_%s] CP_MAX_DAILY_TRADES: %d >= %d", symbol, meta.get("cp_daily_trades", 0), cp_max_day)
                 return
@@ -1162,7 +1246,7 @@ class MT5BotSystem:
                 self.logger.info("[EVAL_%s] CP_PAUSE_ACTIVE: paused until %s", symbol, pause_until)
                 return
 
-        sig, score, risk_mult = self.strategy.generate_signal(
+        sig, score, risk_mult = strategy.generate_signal(
             df, idx, regime=regime, is_london_ny=is_london_ny, htf_trend_aligned=htf_trend_aligned
         )
 
@@ -1176,8 +1260,8 @@ class MT5BotSystem:
         # 2. Meaningful level? (Handled by scoring/strategy)
         
         # 3. Confluence — must meet configured minimum (aligned with strategy.generate_signal)
-        conf_score, conf_details = self.strategy.confluence_score(df, idx, sig, regime=regime)
-        min_conf = int(getattr(self.strategy_cfg, "min_confluence_score", 3) or 3)
+        conf_score, conf_details = strategy.confluence_score(df, idx, sig, regime=regime)
+        min_conf = int(getattr(strategy_cfg, "min_confluence_score", 3) or 3)
         if conf_score < min_conf:
             if market_open_for_scan:
                 self._clear_pending_closed_market_signal(symbol)
@@ -1185,17 +1269,17 @@ class MT5BotSystem:
             return
             
         # 4. Planned R:R execution floor
-        sl, tp = self.strategy.calculate_stop_take_profit(df, idx, sig, regime=regime)
+        sl, tp = strategy.calculate_stop_take_profit(df, idx, sig, regime=regime)
         entry = df.iloc[idx]['close']
         planned_rr = abs(tp - entry) / abs(entry - sl) if abs(entry - sl) > 0 else 0
-        min_rr_ex = float(getattr(self.strategy_cfg, "min_planned_rr_execution", 0.3) or 0.3)
+        min_rr_ex = float(getattr(strategy_cfg, "min_planned_rr_execution", 0.3) or 0.3)
         if min_rr_ex > 0 and planned_rr < min_rr_ex:
             if market_open_for_scan:
                 self._clear_pending_closed_market_signal(symbol)
             self.logger.info("[EVAL_%s] RR_BLOCKED_EARLY: planned_rr=%.2f < min=%.2f", symbol, planned_rr, min_rr_ex)
             return
 
-        cp_min_score = int(getattr(self.strategy_cfg, "cp_min_signal_score", 7) or 7)
+        cp_min_score = int(getattr(strategy_cfg, "cp_min_signal_score", 7) or 7)
         if is_cp_active and score < cp_min_score:
             if market_open_for_scan:
                 self._clear_pending_closed_market_signal(symbol)
@@ -1211,7 +1295,7 @@ class MT5BotSystem:
             )
             return
 
-        max_open_trades = int(getattr(self.strategy_cfg, "max_open_trades", 0) or 0)
+        max_open_trades = int(getattr(strategy_cfg, "max_open_trades", 0) or 0)
         if max_open_trades > 0:
             open_count = self._open_position_count(magic_only=True)
             if open_count >= max_open_trades:
@@ -1221,7 +1305,7 @@ class MT5BotSystem:
         symbol_count = self._open_position_count(symbol=symbol, magic_only=True)
         direction_count = self._open_position_count(symbol=symbol, direction=direction, magic_only=True)
 
-        allow_opposite = bool(getattr(self.strategy_cfg, "allow_opposite_direction_positions", False))
+        allow_opposite = bool(getattr(strategy_cfg, "allow_opposite_direction_positions", False))
         if symbol_count > direction_count and not allow_opposite:
             self.logger.info(
                 "[EVAL_%s] OPPOSITE_DIRECTION_BLOCKED: existing opposite-side position is open",
@@ -1229,7 +1313,7 @@ class MT5BotSystem:
             )
             return
 
-        max_symbol_trades = int(getattr(self.strategy_cfg, "max_open_trades_per_symbol", 1) or 1)
+        max_symbol_trades = int(getattr(strategy_cfg, "max_open_trades_per_symbol", 1) or 1)
         if max_symbol_trades > 0:
             if symbol_count >= max_symbol_trades:
                 self.logger.info(
@@ -1240,7 +1324,7 @@ class MT5BotSystem:
                 )
                 return
 
-        max_direction_trades = int(getattr(self.strategy_cfg, "max_open_trades_per_direction", 1) or 1)
+        max_direction_trades = int(getattr(strategy_cfg, "max_open_trades_per_direction", 1) or 1)
         if max_direction_trades > 0:
             if direction_count >= max_direction_trades:
                 self.logger.info(
@@ -1285,7 +1369,7 @@ class MT5BotSystem:
         # Risk adjustment for VOLATILE
         risk_multiplier = 1.0
         if regime == MarketRegime.VOLATILE:
-            vol_mult = float(getattr(self.strategy_cfg, "volatile_regime_risk_multiplier", 0.78) or 0.78)
+            vol_mult = float(getattr(strategy_cfg, "volatile_regime_risk_multiplier", 0.78) or 0.78)
             self.logger.warning(
                 "[EVAL_%s] VOLATILE_MODE: reducing risk to %.0f%% of base",
                 symbol,
@@ -1331,7 +1415,7 @@ class MT5BotSystem:
             spread_points = 0.0
 
         # Fixed-point spread gate (optional, config-driven; 0 = disabled)
-        max_spread = float(getattr(self.strategy_cfg, "max_spread_points", 0) or 0)
+        max_spread = float(getattr(strategy_cfg, "max_spread_points", 0) or 0)
         if max_spread > 0 and spread_points > max_spread:
             self.logger.info("[EVAL_%s] SPREAD_BLOCKED: spread=%.1f pts > max=%.1f pts", symbol, spread_points, max_spread)
             return
@@ -1350,9 +1434,9 @@ class MT5BotSystem:
             pass
 
         entry = float(tick.ask if sig == Signal.BUY else tick.bid)
-        sl, tp = self.strategy.calculate_stop_take_profit(df, idx, sig, entry_price=entry, regime=regime)
+        sl, tp = strategy.calculate_stop_take_profit(df, idx, sig, entry_price=entry, regime=regime)
 
-        min_rr_ex = float(getattr(self.strategy_cfg, "min_planned_rr_execution", 0.3) or 0.3)
+        min_rr_ex = float(getattr(strategy_cfg, "min_planned_rr_execution", 0.3) or 0.3)
         if min_rr_ex > 0 and abs(entry - sl) > 0:
             planned_rr_live = abs(tp - entry) / abs(entry - sl)
             if planned_rr_live < min_rr_ex:
@@ -1395,13 +1479,19 @@ class MT5BotSystem:
         
         # Capital Protection Mode Risk Override
         if is_cp_active:
-            risk_fraction = float(getattr(self.strategy_cfg, "cp_risk_fraction", 0.005) or 0.005)
+            risk_fraction = float(getattr(strategy_cfg, "cp_risk_fraction", 0.005) or 0.005)
         else:
-            max_risk_fraction = float(getattr(self.strategy_cfg, "max_risk_per_trade", 0.02) or 0.02)
+            max_risk_fraction = float(getattr(strategy_cfg, "max_risk_per_trade", 0.02) or 0.02)
             if max_risk_fraction > 0:
                 risk_fraction = min(float(risk_fraction), max_risk_fraction)
         risk_fraction = max(0.0, float(risk_fraction))
         
+        # Currency Beta & Net Portfolio Exposure Guard
+        curr_ok, curr_reason = self._check_net_currency_risk_limit(symbol, direction, risk_fraction)
+        if not curr_ok:
+            self.logger.info("[EVAL_%s] NET_CURRENCY_RISK_BLOCKED: %s", symbol, curr_reason)
+            return
+
         tick_size = float(getattr(rules, "tick_size", 0.0) or 0.0)
         tick_value = float(getattr(rules, "tick_value", 0.0) or 0.0)
         if tick_size <= 0 or tick_value <= 0:
@@ -1427,7 +1517,7 @@ class MT5BotSystem:
             return
 
         new_risk_amount = abs(float(entry) - float(sl)) * float(value_per_price_unit) * float(vol)
-        max_open_risk = float(getattr(self.strategy_cfg, "max_total_open_risk", 0.03) or 0.03) * float(eff)
+        max_open_risk = float(getattr(strategy_cfg, "max_total_open_risk", 0.03) or 0.03) * float(eff)
         open_risk = self._open_risk_amount()
         if (open_risk + new_risk_amount) > max_open_risk:
             self.logger.warning(
@@ -1478,8 +1568,84 @@ class MT5BotSystem:
                 return True
         return False
 
+    def _currency_breakdown(self, symbol: str) -> tuple[str, str]:
+        """Decompose symbol into base and quote currencies (e.g. EURUSD -> EUR, USD)."""
+        s = symbol.upper()
+        clean = re.sub(r'[^A-Z]', '', s)
+        if len(clean) >= 6:
+            return clean[:3], clean[3:6]
+        return clean, ""
+
+    def _net_currency_exposure(self) -> dict[str, float]:
+        """
+        Calculate net directional risk fraction across all open positions by currency.
+        Positive = net Long currency risk, Negative = net Short currency risk.
+        """
+        exposure: dict[str, float] = defaultdict(float)
+        summary = self.conn.get_account_summary() or {}
+        eff = self._effective_balance(summary)
+        if eff <= 0:
+            return dict(exposure)
+
+        for ticket, t in list(self.trade_manager.open_trades.items()):
+            if int(t.magic) != int(self.system_cfg.magic):
+                continue
+            entry = float(t.entry_price or 0.0)
+            sl = float(t.stop_loss or 0.0)
+            vol = float(t.volume or 0.0)
+            if entry <= 0 or sl <= 0 or vol <= 0:
+                continue
+
+            rules = self.conn.get_broker_rules(str(t.symbol))
+            if rules is None:
+                continue
+            tick_size = float(getattr(rules, "tick_size", 0.0) or 0.0)
+            tick_value = float(getattr(rules, "tick_value", 0.0) or 0.0)
+            if tick_size <= 0 or tick_value <= 0:
+                continue
+            trade_risk_usd = abs(entry - sl) * (tick_value / tick_size) * vol
+            risk_pct = trade_risk_usd / eff
+
+            base, quote = self._currency_breakdown(str(t.symbol))
+            if not base or not quote:
+                continue
+            if t.direction == "buy":
+                exposure[base] += risk_pct
+                exposure[quote] -= risk_pct
+            else:
+                exposure[base] -= risk_pct
+                exposure[quote] += risk_pct
+
+        return dict(exposure)
+
+    def _check_net_currency_risk_limit(self, symbol: str, direction: str, candidate_risk_fraction: float) -> tuple[bool, str]:
+        """
+        Prevent excessive portfolio beta concentration by capping net directional risk per currency.
+        """
+        max_currency_risk = float(getattr(self.strategy_cfg, "max_net_currency_risk", 0.025) or 0.025)
+        if max_currency_risk <= 0:
+            return True, "OK"
+
+        exposure = self._net_currency_exposure()
+        base, quote = self._currency_breakdown(symbol)
+        if not base or not quote:
+            return True, "OK"
+
+        delta_base = candidate_risk_fraction if direction == "buy" else -candidate_risk_fraction
+        delta_quote = -candidate_risk_fraction if direction == "buy" else candidate_risk_fraction
+
+        new_base_risk = abs(exposure.get(base, 0.0) + delta_base)
+        new_quote_risk = abs(exposure.get(quote, 0.0) + delta_quote)
+
+        if new_base_risk > max_currency_risk:
+            return False, f"Net {base} directional risk {new_base_risk:.1%} exceeds ceiling {max_currency_risk:.1%}"
+        if new_quote_risk > max_currency_risk:
+            return False, f"Net {quote} directional risk {new_quote_risk:.1%} exceeds ceiling {max_currency_risk:.1%}"
+
+        return True, "OK"
+
     def _calculate_dynamic_risk(self) -> float:
-        """Scale risk down during drawdown and up only after positive conditions."""
+        """Scale risk down during drawdown, auto-throttle on strategy degradation, and boost after wins."""
         base_risk = float(getattr(self.strategy_cfg, "risk_per_trade", 0.005) or 0.005)
         max_risk = float(getattr(self.strategy_cfg, "max_risk_per_trade", base_risk) or base_risk)
         summary = self.conn.get_account_summary() or {}
@@ -1517,6 +1683,17 @@ class MT5BotSystem:
                 if streak_ok or gain_ok:
                     risk = base_risk * max(1.0, boost_mult)
                     reason = "boost_winning_streak" if streak_ok else "boost_daily_gain"
+
+        # Strategy Health Auto-Throttle (self-healing during strategy degradation)
+        if hasattr(self, "performance") and self.performance:
+            try:
+                diag = self.performance.get_strategy_health_diagnostics()
+                throttle = float(diag.get("throttle_risk_factor", 1.0) or 1.0)
+                if throttle < 1.0:
+                    risk = risk * throttle
+                    reason = f"auto_throttle_{int(throttle * 100)}pct"
+            except Exception:
+                pass
 
         if max_risk > 0:
             risk = min(risk, max_risk)
@@ -1807,6 +1984,7 @@ class MT5BotSystem:
 
         _reconnect_wait = int(self.system_cfg.poll_seconds)  # start at poll interval
         while not self._shutdown_requested:
+            self._reload_config_if_modified()
             self.notifier.poll_updates()
             self._send_heartbeat()
             
@@ -1853,25 +2031,3 @@ class MT5BotSystem:
             pass
 
 
-def build_system_config_from_env(symbols: list[str], timeframe: str, poll_seconds: int) -> SystemConfig:
-    magic = int(float(os.getenv("BOT_MAGIC", 0) or 0))
-    state_path = str(os.getenv("TRADES_STATE_PATH", "data/trades_state.json") or "data/trades_state.json")
-    avoid_news_minutes = int(float(os.getenv("AVOID_NEWS_MINUTES", 60) or 60))
-    cfg_json = str(os.getenv("CONFIG_JSON", "config/config_rsi_pullback.json") or "config/config_rsi_pullback.json")
-    bot_switch_path = str(os.getenv("BOT_SWITCH_PATH", "data/bot_switch.txt") or "data/bot_switch.txt")
-    return SystemConfig(
-        symbols=symbols,
-        timeframe=timeframe,
-        poll_seconds=int(poll_seconds),
-        magic=magic,
-        state_path=state_path,
-        avoid_news_minutes=avoid_news_minutes,
-        config_json_path=cfg_json,
-        bot_switch_path=bot_switch_path,
-    )
-
-
-def load_env() -> None:
-    if load_dotenv is None:
-        return
-    load_dotenv(override=False)

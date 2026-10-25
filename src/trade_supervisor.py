@@ -1,12 +1,11 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import asdict
 from datetime import datetime, timezone
 from typing import Optional
 
 from mt5_connection import MT5Connection
-from trade_manager import ManagedTrade, TradeManager
+from trade_manager import TradeManager
 from telegram_notifier import TelegramNotifier
 from trading_bot_engulfing_v2 import TradingConfig
 
@@ -125,11 +124,6 @@ class TradeSupervisor:
                     "r_achieved": r_achieved,
                 })
 
-    def _in_profit(self, trade: ManagedTrade, bid: float, ask: float) -> bool:
-        if trade.direction == "buy":
-            return bid > trade.entry_price
-        return ask < trade.entry_price
-
     def manage_position(self, ticket: int) -> None:
         t = self.trade_manager.get(ticket)
         if t is None or t.magic != self.magic:
@@ -247,6 +241,21 @@ class TradeSupervisor:
             should_update = (current_sl <= 0) or (desired_sl < (current_sl - min_step))
             price_for_validation = ask
 
+        # Stagnation / Time-decay stop: if open for >= stagnation_bars without reaching 1R, protect capital
+        stagnation_bars = int(getattr(self.config, 'stagnation_bars', 10) or 10) if self.config is not None else 10
+        stagnation_reached = False
+        if stagnation_bars > 0 and pos_time > 0 and not be_reached and not trailing_reached and not t.moved_to_break_even:
+            elapsed_bars = sum(1 for r in rates if int(r.get("time", 0)) > pos_time)
+            if elapsed_bars >= stagnation_bars:
+                if t.direction == "buy" and bid > entry:
+                    desired_sl = max(desired_sl, entry)
+                    stagnation_reached = True
+                    should_update = desired_sl > (current_sl + min_step)
+                elif t.direction == "sell" and ask < entry:
+                    desired_sl = min(desired_sl, entry)
+                    stagnation_reached = True
+                    should_update = (current_sl <= 0) or (desired_sl < (current_sl - min_step))
+
         # Partial close at 1.5R: scale out 50% of position
         allow_pc = True
         if self.config is not None:
@@ -258,9 +267,12 @@ class TradeSupervisor:
                 current_vol = float(getattr(pos, 'volume', 0.0) or 0.0)
                 close_vol = self.connection.normalize_volume(symbol, current_vol * 0.5)
                 if close_vol is not None and close_vol > 0 and close_vol < current_vol:
+                    max_slip = 10
+                    if self.config is not None:
+                        max_slip = int(getattr(self.config, 'max_slippage_points', 10) or 10)
                     partial_result = self.connection.close_position(
                         ticket=ticket,
-                        deviation=int(getattr(t, 'volume', 10) or 10),
+                        deviation=max_slip,
                         comment="PARTIAL@1.5R",
                         volume=close_vol,
                     )
@@ -292,6 +304,8 @@ class TradeSupervisor:
             comment = "TRAIL@1.5R"
         elif be_reached and not t.moved_to_break_even:
             comment = "BE@1R"
+        elif stagnation_reached:
+            comment = "STAGNATION@BE"
 
         res = self.connection.set_position_sltp(
             ticket=ticket,
@@ -302,7 +316,7 @@ class TradeSupervisor:
         if res is None:
             return
 
-        t.moved_to_break_even = bool(t.moved_to_break_even or be_reached)
+        t.moved_to_break_even = bool(t.moved_to_break_even or be_reached or stagnation_reached)
         t.last_known_sl = float(desired_sl)
         t.last_known_tp = float(current_tp)
         t.last_trail_time = int(last_closed_time)
@@ -310,7 +324,7 @@ class TradeSupervisor:
         t.profit_loss = float(getattr(pos, "profit", 0.0) or 0.0)
         self.trade_manager.upsert(t)
 
-        action = "breakeven" if comment == "BE@1R" else "trailing"
+        action = "breakeven" if comment == "BE@1R" else ("stagnation_be" if comment == "STAGNATION@BE" else "trailing")
 
         self.logger.info("Updated managed SL ticket=%s action=%s sl=%.5f", ticket, action, desired_sl)
         if self.notifier:
@@ -334,26 +348,43 @@ class TradeSupervisor:
         if entry <= 0:
             return
 
-        # Check for structure break: if price closes beyond key swing level against trade
-        recent = rates[-5:]
+        # Check for structure break: only on fully closed candles (rates[-2]), not the forming candle (rates[-1])
+        closed_rates = rates[:-1]
+        if len(closed_rates) < 4:
+            return
+
+        last_closed = closed_rates[-1]
+        last_closed_time = int(last_closed.get("time", 0) or 0)
+        if int(getattr(t, "last_structure_check_time", 0) or 0) >= last_closed_time:
+            return
+
+        recent = closed_rates[-5:]
+        max_slip = 10
+        if self.config is not None:
+            max_slip = int(getattr(self.config, 'max_slippage_points', 10) or 10)
+
         if t.direction == "buy":
-            # For buys, structure breaks if price closes below recent swing low
+            # For buys, structure breaks if closed candle is below recent swing low
             swing_low = float(min(r["low"] for r in recent[:-1]))
-            last_close = float(recent[-1]["close"])
+            last_close = float(last_closed["close"])
             if last_close < swing_low:
                 self.logger.warning("Structure invalidation: closing BUY ticket=%s close=%.5f < swing_low=%.5f", ticket, last_close, swing_low)
                 if self.notifier:
                     self.notifier.send(f"⚠️ Structure break! Early exit: {symbol} BUY ticket={ticket}")
-                self.connection.close_position(ticket=ticket, comment="STRUCTURE_BREAK")
+                self.connection.close_position(ticket=ticket, deviation=max_slip, comment="STRUCTURE_BREAK")
+                t.last_structure_check_time = last_closed_time
+                self.trade_manager.upsert(t)
         else:
-            # For sells, structure breaks if price closes above recent swing high
+            # For sells, structure breaks if closed candle is above recent swing high
             swing_high = float(max(r["high"] for r in recent[:-1]))
-            last_close = float(recent[-1]["close"])
+            last_close = float(last_closed["close"])
             if last_close > swing_high:
                 self.logger.warning("Structure invalidation: closing SELL ticket=%s close=%.5f > swing_high=%.5f", ticket, last_close, swing_high)
                 if self.notifier:
                     self.notifier.send(f"⚠️ Structure break! Early exit: {symbol} SELL ticket={ticket}")
-                self.connection.close_position(ticket=ticket, comment="STRUCTURE_BREAK")
+                self.connection.close_position(ticket=ticket, deviation=max_slip, comment="STRUCTURE_BREAK")
+                t.last_structure_check_time = last_closed_time
+                self.trade_manager.upsert(t)
 
     def _find_swing_point(self, rates, direction: str, lookback: int = 10) -> Optional[float]:
         """

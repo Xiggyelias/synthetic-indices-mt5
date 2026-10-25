@@ -246,6 +246,19 @@ See `docs/VPS_SETUP_GUIDE.md` for full VPS instructions.
 
 ---
 
+## 🧠 Quantum Brain v2 (Deriv Volatility Indices, Rise/Fall research)
+
+A separate research and decision system for five-minute Rise/Fall contracts on Deriv
+Volatility Indices: Deriv WebSocket data collection, contract-aware labels, walk-forward
+validation with purging and a protected holdout, a deterministic risk governor, a model
+registry that needs human approval, and a read-only dashboard. It defaults to paper mode
+and has no real-money mode. See [docs/QUANTUM_BRAIN_V2.md](docs/QUANTUM_BRAIN_V2.md).
+
+```bash
+python quantum_brain.py migrate && python quantum_brain.py discover
+streamlit run dashboard_quantum.py
+```
+
 ## ⚠️ Disclaimer
 
 Trading involves significant risk of loss. This software is provided for educational and research purposes. Always test thoroughly on a demo account before considering any live deployment. Past performance does not guarantee future results.

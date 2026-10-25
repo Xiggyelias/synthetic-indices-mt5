@@ -14,7 +14,7 @@ import json
 import logging
 import os
 import sys
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Dict, List, Optional
 from dataclasses import dataclass, asdict
 
@@ -27,7 +27,6 @@ try:
 except ImportError:
     _DB_MODULE_OK = False
 
-import pandas as pd
 
 
 @dataclass
@@ -63,7 +62,7 @@ class DailyMetrics:
 class ForwardTestTracker:
     """Tracks forward-testing performance against backtest expectations."""
 
-    def __init__(self, config_file: str = "config/forward_test_config.json", telegram_notifier=None):
+    def __init__(self, config_file: str = "config/forward_test_config.json", telegram_notifier=None, database_manager=None, use_db: Optional[bool] = None):
         self.config_file = config_file
         self.telegram_notifier = telegram_notifier
         self.trades: List[LiveTrade] = []
@@ -84,14 +83,19 @@ class ForwardTestTracker:
         }
 
         # MySQL
-        self._db: Optional[DatabaseManager] = None
-        self._use_db = False
-        if _DB_MODULE_OK:
-            try:
-                self._db = DatabaseManager.from_env()
-                self._use_db = self._db.available
-            except Exception as e:
-                self.logger.warning("DB unavailable: %s — using JSON fallback", e)
+        self._db: Optional[DatabaseManager] = database_manager
+        if use_db is False:
+            self._use_db = False
+        elif database_manager is not None:
+            self._use_db = bool(getattr(database_manager, 'available', True))
+        else:
+            self._use_db = False
+            if _DB_MODULE_OK:
+                try:
+                    self._db = DatabaseManager.from_env()
+                    self._use_db = self._db.available
+                except Exception as e:
+                    self.logger.warning("DB unavailable: %s — using JSON fallback", e)
 
         if self._use_db:
             self.logger.info("ForwardTestTracker using MySQL")
@@ -378,12 +382,22 @@ class ForwardTestTracker:
     # ── analysis ──────────────────────────────────────────────────────────────
     def calculate_current_metrics(self) -> Dict:
         """Calculate current forward-testing metrics."""
-        if not self.trades:
-            return {"status": "No trades recorded"}
-
         completed = [t for t in self.trades if t.exit_time is not None]
         if not completed:
-            return {"status": "No completed trades"}
+            return {
+                "status": "No completed trades" if self.trades else "No trades recorded",
+                "total_trades": 0,
+                "win_rate": 0.0,
+                "profit_factor": 0.0,
+                "expectancy": 0.0,
+                "avg_slippage_pips": 0.0,
+                "max_slippage": 0.0,
+                "avg_spread_pips": 0.0,
+                "max_spread_pips": 0.0,
+                "total_pnl": 0.0,
+                "test_duration_days": (datetime.now() - self.start_date).days,
+                "target_completion": False,
+            }
 
         wins = [t for t in completed if (t.profit_loss or 0) > 0]
         losses = [t for t in completed if (t.profit_loss or 0) < 0]

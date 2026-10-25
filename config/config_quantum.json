@@ -1,0 +1,33 @@
+{
+  "trading_mode": "paper",
+  "demo_only": true,
+  "enable_trading": false,
+  "currency": "USD",
+  "contract_family": "RISE_FALL",
+  "duration": 5,
+  "duration_unit": "m",
+  "deriv_api_version": "new",
+  "symbols": ["R_10", "R_25", "R_50", "R_75", "R_100", "1HZ10V", "1HZ25V", "1HZ50V", "1HZ75V", "1HZ100V"],
+  "db_path": "data/quantum_brain.db",
+  "model_dir": "data/qb2_models",
+  "decision_interval_seconds": 60,
+  "execution_latency_seconds": 1.0,
+  "min_edge_fraction": 0.02,
+  "uncertainty_z": 1.0,
+  "risk": {
+    "max_stake_fraction": 0.01,
+    "min_stake": 0.35,
+    "max_stake": 25.0,
+    "max_daily_loss_fraction": 0.03,
+    "max_drawdown_fraction": 0.10,
+    "max_trades_per_day": 20,
+    "max_concurrent_positions": 1,
+    "consecutive_loss_limit": 4,
+    "cooldown_minutes": 60,
+    "max_tick_age_seconds": 10,
+    "max_quote_age_seconds": 3,
+    "reconciliation_tolerance": 0.01,
+    "max_disconnects_per_hour": 5,
+    "max_abnormal_responses": 3
+  }
+}

@@ -1,0 +1,25 @@
+version: "3.9"
+
+services:
+  quanta-synth-frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: quanta-synth-frontend
+    restart: unless-stopped
+    ports:
+      - "8501:8501"
+    environment:
+      - PYTHONUNBUFFERED=1
+      - PYTHONPATH=/app/src
+    volumes:
+      # Persist trading state, configurations, and logs on the VPS host
+      - ./data:/app/data
+      - ./logs:/app/logs
+      - ./config:/app/config
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8501/_stcore/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s

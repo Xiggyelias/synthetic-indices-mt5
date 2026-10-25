@@ -11,7 +11,6 @@ Run this to get detailed information about:
 import sys
 import os
 from datetime import datetime, timezone, timedelta
-import json
 
 # Add src to path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))

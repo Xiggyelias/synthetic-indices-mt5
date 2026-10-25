@@ -16,7 +16,7 @@ import os
 import sys
 import time
 from contextlib import redirect_stdout
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from typing import List
 
 # Add src to path to allow direct imports from the src directory
@@ -31,7 +31,7 @@ except Exception:  # pragma: no cover
 
 from mt5_connection import MT5Connection, MT5Credentials, TIMEFRAME_MAP
 from trading_bot_engulfing_v2 import EngulfingBotV2, Signal, TimeFrame, TradingConfig
-from telegram_notifier import TelegramNotifier, build_telegram_config_from_env
+from telegram_notifier import TelegramNotifier
 # from mt5_strategy import EngulfingCandleStrategy, EngulfingConfig
 
 
@@ -77,9 +77,9 @@ def parse_args():
     )
     parser.add_argument(
         "--strategy",
-        choices=["none", "engulfing_v2", "engulfing"],
+        choices=["none", "engulfing_v2"],
         default="none",
-        help="Optional strategy mode. Use 'engulfing' (mt5_strategy.py) or 'engulfing_v2' to generate signals and optionally trade.",
+        help="Optional strategy mode. Use 'engulfing_v2' to generate signals and optionally trade.",
     )
     parser.add_argument(
         "--loop",
@@ -312,130 +312,23 @@ def cli_flag_present(flag: str) -> bool:
     return flag in sys.argv
 
 
+def is_bot_switch_enabled(path: str) -> bool:
+    try:
+        if not path or not os.path.exists(path):
+            return True
+        with open(path, "r", encoding="utf-8") as f:
+            raw = (f.read() or "").strip().lower()
+    except Exception:
+        return True
+
+    if raw in ("0", "off", "false", "no", "disabled", "pause", "paused"):
+        return False
+    return True
+
+
 def _parse_ymd(value: str) -> datetime:
     value = (value or "").strip()
     return datetime.strptime(value, "%Y-%m-%d")
-
-
-def load_v2_config_from_json(path: str) -> TradingConfig:
-    cfg = TradingConfig()
-    if not path or not os.path.exists(path):
-        return cfg
-
-    with open(path, "r", encoding="utf-8") as f:
-        raw = json.load(f) or {}
-
-    rm = (raw.get("risk_management") or {})
-    sp = (raw.get("strategy_parameters") or {})
-    rsi = (sp.get("rsi_settings") or {})
-    vol = (sp.get("volume_settings") or {})
-    sr = (sp.get("support_resistance") or {})
-
-    if "risk_per_trade" in rm:
-        cfg.risk_per_trade = float(rm.get("risk_per_trade"))
-    if "min_risk_reward" in rm:
-        cfg.min_risk_reward = float(rm.get("min_risk_reward"))
-    if "max_drawdown" in rm:
-        cfg.max_drawdown = float(rm.get("max_drawdown"))
-    if "initial_capital" in rm:
-        cfg.initial_capital = float(rm.get("initial_capital"))
-    if "atr_trailing_mult" in rm:
-        cfg.atr_trailing_mult = float(rm.get("atr_trailing_mult"))
-    if "max_risk_per_trade" in rm:
-        cfg.max_risk_per_trade = float(rm.get("max_risk_per_trade") or cfg.max_risk_per_trade)
-    if "max_total_open_risk" in rm:
-        cfg.max_total_open_risk = float(rm.get("max_total_open_risk") or cfg.max_total_open_risk)
-    if "max_open_trades" in rm:
-        cfg.max_open_trades = int(rm.get("max_open_trades") or cfg.max_open_trades)
-    if "max_open_trades_per_symbol" in rm:
-        cfg.max_open_trades_per_symbol = int(rm.get("max_open_trades_per_symbol") or cfg.max_open_trades_per_symbol)
-    if "max_open_trades_per_direction" in rm:
-        cfg.max_open_trades_per_direction = int(rm.get("max_open_trades_per_direction") or cfg.max_open_trades_per_direction)
-    if "allow_opposite_direction_positions" in rm:
-        cfg.allow_opposite_direction_positions = bool(rm.get("allow_opposite_direction_positions"))
-    if "max_daily_loss" in rm:
-        cfg.max_daily_loss = float(rm.get("max_daily_loss") or cfg.max_daily_loss)
-    if "allow_partial_close" in rm:
-        cfg.allow_partial_close = bool(rm.get("allow_partial_close"))
-
-    if "capital_protection_enabled" in rm:
-        cfg.capital_protection_enabled = bool(rm.get("capital_protection_enabled"))
-    if "capital_protection_daily_loss_trigger" in rm:
-        cfg.cp_daily_loss_trigger = float(rm.get("capital_protection_daily_loss_trigger") or cfg.cp_daily_loss_trigger)
-    if "capital_protection_weekly_loss_trigger" in rm:
-        cfg.cp_weekly_loss_trigger = float(rm.get("capital_protection_weekly_loss_trigger") or cfg.cp_weekly_loss_trigger)
-    if "capital_protection_consecutive_losses_trigger" in rm:
-        cfg.cp_consecutive_losses_trigger = int(rm.get("capital_protection_consecutive_losses_trigger") or cfg.cp_consecutive_losses_trigger)
-    if "capital_protection_risk_fraction" in rm:
-        cfg.cp_risk_fraction = float(rm.get("capital_protection_risk_fraction") or cfg.cp_risk_fraction)
-    if "capital_protection_min_signal_score" in rm:
-        cfg.cp_min_signal_score = int(rm.get("capital_protection_min_signal_score") or cfg.cp_min_signal_score)
-    if "capital_protection_max_trades_per_day" in rm:
-        cfg.cp_max_trades_per_day = int(rm.get("capital_protection_max_trades_per_day") or cfg.cp_max_trades_per_day)
-    if "losing_streak_pause_after" in rm:
-        cfg.losing_streak_pause_after = int(rm.get("losing_streak_pause_after") or cfg.losing_streak_pause_after)
-    if "losing_streak_cooldown_seconds" in rm:
-        cfg.losing_streak_cooldown_seconds = float(rm.get("losing_streak_cooldown_seconds") or cfg.losing_streak_cooldown_seconds)
-    if "dynamic_risk_daily_dd_soft" in rm:
-        cfg.dynamic_risk_daily_dd_soft = float(rm.get("dynamic_risk_daily_dd_soft") or cfg.dynamic_risk_daily_dd_soft)
-    if "dynamic_risk_daily_dd_hard" in rm:
-        cfg.dynamic_risk_daily_dd_hard = float(rm.get("dynamic_risk_daily_dd_hard") or cfg.dynamic_risk_daily_dd_hard)
-    if "dynamic_risk_soft_multiplier" in rm:
-        cfg.dynamic_risk_soft_multiplier = float(rm.get("dynamic_risk_soft_multiplier") or cfg.dynamic_risk_soft_multiplier)
-    if "dynamic_risk_hard_multiplier" in rm:
-        cfg.dynamic_risk_hard_multiplier = float(rm.get("dynamic_risk_hard_multiplier") or cfg.dynamic_risk_hard_multiplier)
-    if "volatile_regime_risk_multiplier" in rm:
-        cfg.volatile_regime_risk_multiplier = float(rm.get("volatile_regime_risk_multiplier") or cfg.volatile_regime_risk_multiplier)
-    if "dynamic_risk_boost_enabled" in rm:
-        cfg.dynamic_risk_boost_enabled = bool(rm.get("dynamic_risk_boost_enabled"))
-    if "dynamic_risk_boost_after_wins" in rm:
-        cfg.dynamic_risk_boost_after_wins = int(rm.get("dynamic_risk_boost_after_wins") or cfg.dynamic_risk_boost_after_wins)
-    if "dynamic_risk_boost_min_daily_gain" in rm:
-        cfg.dynamic_risk_boost_min_daily_gain = float(rm.get("dynamic_risk_boost_min_daily_gain") or cfg.dynamic_risk_boost_min_daily_gain)
-    if "dynamic_risk_boost_multiplier" in rm:
-        cfg.dynamic_risk_boost_multiplier = float(rm.get("dynamic_risk_boost_multiplier") or cfg.dynamic_risk_boost_multiplier)
-
-    if "ema_fast" in sp:
-        cfg.ema_fast = int(sp.get("ema_fast"))
-    if "ema_slow" in sp:
-        cfg.ema_slow = int(sp.get("ema_slow"))
-    if "strategy_mode" in sp:
-        cfg.strategy_mode = str(sp.get("strategy_mode"))
-    if "skip_weak_range_entries" in sp:
-        cfg.skip_weak_range_entries = bool(sp.get("skip_weak_range_entries"))
-    if "min_trade_score_full_entry" in sp:
-        cfg.min_trade_score_full_entry = int(sp.get("min_trade_score_full_entry"))
-    if "min_trade_score_half_entry" in sp:
-        cfg.min_trade_score_half_entry = int(sp.get("min_trade_score_half_entry"))
-    if "min_planned_rr_execution" in sp:
-        cfg.min_planned_rr_execution = float(sp.get("min_planned_rr_execution"))
-    tf_raw = str(sp.get("timeframe", "") or "").upper().strip()
-    if tf_raw:
-        try:
-            cfg.timeframe = map_timeframe_to_engulfing(tf_raw)
-        except ValueError:
-            pass
-
-    cfg.use_rsi_filter = bool(rsi.get("use_rsi_filter", cfg.use_rsi_filter))
-    cfg.rsi_period = int(rsi.get("rsi_period", cfg.rsi_period))
-    cfg.rsi_overbought = float(rsi.get("rsi_overbought", cfg.rsi_overbought))
-    cfg.rsi_oversold = float(rsi.get("rsi_oversold", cfg.rsi_oversold))
-    cfg.rsi_pullback_enabled = bool(rsi.get("rsi_pullback_enabled", cfg.rsi_pullback_enabled))
-    cfg.rsi_pullback_buy_threshold = float(rsi.get("rsi_pullback_buy_threshold", cfg.rsi_pullback_buy_threshold))
-    cfg.rsi_pullback_sell_threshold = float(rsi.get("rsi_pullback_sell_threshold", cfg.rsi_pullback_sell_threshold))
-    cfg.rsi_lookback_candles = int(rsi.get("rsi_lookback_candles", cfg.rsi_lookback_candles))
-
-    cfg.volume_multiplier = float(vol.get("volume_multiplier", cfg.volume_multiplier))
-    cfg.volume_period = int(vol.get("volume_period", cfg.volume_period))
-
-    cfg.sr_lookback = int(sr.get("sr_lookback", cfg.sr_lookback))
-    cfg.sr_tolerance = float(sr.get("sr_tolerance", cfg.sr_tolerance))
-
-    conf = (sp.get("confluence_settings") or {})
-    if "min_confluence_score" in conf:
-        cfg.min_confluence_score = int(conf.get("min_confluence_score"))
-
-    return cfg
 
 
 def main():
@@ -462,7 +355,7 @@ def main():
             logging.StreamHandler(sys.stdout)
         ]
     )
-    logger = logging.getLogger("mt5-bot")
+    logging.getLogger("mt5-bot")
 
     if load_dotenv is not None:
         load_dotenv(override=False)
@@ -499,6 +392,12 @@ def main():
             print(f"❌ Status check failed: {e}")
         return
 
+    if args.system:
+        switch_path = str(os.getenv("BOT_SWITCH_PATH", args.bot_switch_path) or args.bot_switch_path)
+        if not is_bot_switch_enabled(switch_path):
+            print(f"Bot switch is OFF ({switch_path}). Skipping MT5 startup.")
+            return
+
     login = args.login if args.login is not None else os.getenv("MT5_LOGIN")
     password = args.password if args.password is not None else os.getenv("MT5_PASSWORD")
     server = args.server if args.server is not None else os.getenv("MT5_SERVER")
@@ -524,7 +423,19 @@ def main():
         is_demo=not args.live,
     )
 
-    symbols = parse_symbols(args.symbols)
+    if not cli_flag_present("--symbols") and os.getenv("SYMBOLS"):
+        symbols = parse_symbols(os.getenv("SYMBOLS"))
+    else:
+        symbols = parse_symbols(args.symbols)
+
+    if not cli_flag_present("--timeframe") and os.getenv("TIMEFRAME"):
+        args.timeframe = str(os.getenv("TIMEFRAME")).strip().upper()
+
+    if not cli_flag_present("--poll-seconds") and os.getenv("POLL_SECONDS"):
+        try:
+            args.poll_seconds = int(os.getenv("POLL_SECONDS"))
+        except (ValueError, TypeError):
+            pass
 
     conn = MT5Connection(credentials)
     if not conn.initialize():
@@ -802,7 +713,7 @@ def main():
                 if result is None:
                     print(f"   ❌ Close failed for ticket {ticket}")
                 else:
-                    print(f"   ✅ Position closed successfully")
+                    print("   ✅ Position closed successfully")
                     closed_count += 1
             
             print(f"\n🎉 Emergency Close complete. Closed {closed_count}/{len(matching_positions)} positions.")
@@ -843,7 +754,7 @@ def main():
             df = df.set_index("time")
 
             cfg_path = str(args.backtest_config_json or "")
-            cfg = load_trading_config_from_json(cfg_path)
+            cfg = load_trading_config_from_json(cfg_path, symbol=sym)
             cfg.timeframe = map_timeframe_to_engulfing(args.timeframe)
             if cli_flag_present("--v2-strategy-mode"):
                 cfg.strategy_mode = str(args.v2_strategy_mode)
@@ -906,6 +817,8 @@ def main():
                 "date_from": date_from.isoformat(),
                 "date_to": date_to.isoformat(),
                 "candles": int(len(df)),
+                "enabled": bool(getattr(cfg, "enabled", True)),
+                "allowed_directions": list(getattr(cfg, "allowed_directions", ["buy", "sell"]) or []),
                 "strategy_mode": str(cfg.strategy_mode),
                 "volume_multiplier": float(cfg.volume_multiplier),
                 "sr_tolerance": float(cfg.sr_tolerance),
@@ -1184,7 +1097,6 @@ def main():
         print("\nOHLCV (head)")
         strategy_bot = None
         strategy_timeframe = None
-        strategy_engulf = None
         if args.strategy == "engulfing_v2":
             strategy_timeframe = map_timeframe_to_engulfing(args.timeframe)
             cfg = TradingConfig(timeframe=strategy_timeframe)
@@ -1203,24 +1115,6 @@ def main():
             if cli_flag_present("--v2-min-risk-reward") and float(args.v2_min_risk_reward or 0.0) > 0:
                 cfg.min_risk_reward = float(args.v2_min_risk_reward)
             strategy_bot = EngulfingBotV2(cfg)
-        if args.strategy == "engulfing":
-            cfg = EngulfingConfig(
-                risk_per_trade=float(args.engulf_risk),
-                min_risk_reward=float(args.engulf_rr),
-                ema_fast=int(args.engulf_ema_fast),
-                ema_slow=int(args.engulf_ema_slow),
-                use_trend_filter=not bool(args.engulf_no_trend),
-                use_rsi_filter=not bool(args.engulf_no_rsi),
-                rsi_period=int(args.engulf_rsi_period),
-                rsi_buy_max=float(args.engulf_rsi_buy_max),
-                rsi_sell_min=float(args.engulf_rsi_sell_min),
-                candles=int(args.engulf_candles),
-                sl_buffer_points=int(args.engulf_sl_buffer),
-                allow_live=bool(args.live),
-                magic=int(float(os.getenv("BOT_MAGIC", args.bot_magic) or 0)),
-                comment="engulfing",
-            )
-            strategy_engulf = EngulfingCandleStrategy(conn, symbols, timeframe=args.timeframe, config=cfg)
 
         last_processed_candle_by_symbol = {}
 
@@ -1228,8 +1122,6 @@ def main():
             count = args.count
             if args.strategy == "engulfing_v2":
                 count = max(count, 350)
-            if args.strategy == "engulfing":
-                count = max(count, int(args.engulf_candles))
 
             rates = conn.get_rates(sym, timeframe=args.timeframe, count=count)
             if rates is None:
@@ -1243,37 +1135,6 @@ def main():
                 print(f"\n{sym} {args.timeframe} candles (showing first 5):")
                 cols = [c for c in ["time", "open", "high", "low", "close", "tick_volume", "real_volume"] if c in df.columns]
                 print(df[cols].head())
-
-            if args.strategy == "engulfing" and strategy_engulf is not None:
-                intent = strategy_engulf.evaluate_symbol(sym)
-                if intent is None:
-                    return
-                print(
-                    f"\nSTRATEGY engulfing | {sym} {args.timeframe} | {intent.direction.upper()} vol={intent.volume:.2f} SL={intent.stop_loss:.5f} TP={intent.take_profit:.5f}"
-                )
-                if not args.confirm_trading:
-                    return
-                if not live_trading_permitted():
-                    return
-                if summary.get("trade_allowed") is False:
-                    return
-                if status.get("trade_allowed") is False:
-                    return
-                result = conn.send_market_order(
-                    symbol=sym,
-                    direction=intent.direction,
-                    volume=float(intent.volume),
-                    stop_loss=float(intent.stop_loss or 0.0),
-                    take_profit=float(intent.take_profit or 0.0),
-                    deviation=args.order_deviation,
-                    magic=int(float(os.getenv("BOT_MAGIC", args.bot_magic) or 0)),
-                    comment=intent.rationale or "engulfing",
-                )
-                if result is None:
-                    print("❌ Strategy order placement failed; check logs for details")
-                else:
-                    print(f"✅ Strategy order placed successfully (ticket={result.order})")
-                return
 
             if args.strategy != "engulfing_v2" or strategy_bot is None:
                 return

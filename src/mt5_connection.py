@@ -17,20 +17,31 @@ import math
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Dict, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
-import MetaTrader5 as mt5
+try:
+    import MetaTrader5 as mt5
+except ImportError:
+    mt5 = None
 
 
 # --- Data models ---
 
 @dataclass
 class MT5Credentials:
-    login: int
-    password: str
-    server: str
+    login: int = 0
+    password: str = ""
+    server: str = "Deriv-Demo"
     terminal_path: Optional[str] = None
     is_demo: bool = True  # default to demo
+    path: Optional[str] = None
+    portable: bool = False
+
+    def __post_init__(self):
+        if self.path and not self.terminal_path:
+            self.terminal_path = self.path
+        elif self.terminal_path and not self.path:
+            self.path = self.terminal_path
 
 
 @dataclass
@@ -57,13 +68,13 @@ class BrokerRules:
 # --- Timeframe mapping helpers ---
 
 TIMEFRAME_MAP: Dict[str, int] = {
-    "M1": mt5.TIMEFRAME_M1,
-    "M5": mt5.TIMEFRAME_M5,
-    "M15": mt5.TIMEFRAME_M15,
-    "M30": mt5.TIMEFRAME_M30,
-    "H1": mt5.TIMEFRAME_H1,
-    "H4": mt5.TIMEFRAME_H4,
-    "D1": mt5.TIMEFRAME_D1,
+    "M1": getattr(mt5, "TIMEFRAME_M1", 1) if mt5 else 1,
+    "M5": getattr(mt5, "TIMEFRAME_M5", 5) if mt5 else 5,
+    "M15": getattr(mt5, "TIMEFRAME_M15", 15) if mt5 else 15,
+    "M30": getattr(mt5, "TIMEFRAME_M30", 30) if mt5 else 30,
+    "H1": getattr(mt5, "TIMEFRAME_H1", 16385) if mt5 else 16385,
+    "H4": getattr(mt5, "TIMEFRAME_H4", 16388) if mt5 else 16388,
+    "D1": getattr(mt5, "TIMEFRAME_D1", 16408) if mt5 else 16408,
 }
 
 
@@ -91,7 +102,6 @@ class MT5Connection:
         self.auto_reconnect = auto_reconnect
         self.initialize_timeout_ms = initialize_timeout_ms
         self.connected: bool = False
-        self._account_cache: Optional[mt5.AccountInfo] = None
         self.last_order_error: Dict[str, Any] = {}
 
         logging.basicConfig(
@@ -104,6 +114,9 @@ class MT5Connection:
 
     def initialize(self) -> bool:
         """Initialize MT5 connection with retries."""
+        if mt5 is None:
+            self.logger.warning("MetaTrader5 package is unavailable in this environment (non-Windows / Docker).")
+            return False
         self.logger.info(
             "Initializing MT5 (%s)... demo=%s",
             self.app_name,
@@ -143,7 +156,6 @@ class MT5Connection:
                 if mt5.initialize(**init_kwargs):
                     account_info = mt5.account_info()
                     if account_info:
-                        self._account_cache = account_info
                         self._log_account_status(account_info)
                         if not account_info.trade_allowed:
                             self.logger.warning(
@@ -225,10 +237,7 @@ class MT5Connection:
     def get_account_info(self) -> Optional[mt5.AccountInfo]:
         if not self.ensure_connected():
             return None
-        info = mt5.account_info()
-        if info:
-            self._account_cache = info
-        return info
+        return mt5.account_info()
 
     def get_account_summary(self) -> Optional[Dict[str, Union[int, float, str]]]:
         info = self.get_account_info()
@@ -1114,7 +1123,7 @@ class MT5Connection:
             mt5.shutdown()
             return False
 
-        if int(info.login) != int(self.credentials.login):
+        if self.credentials.login and int(self.credentials.login) > 0 and int(info.login) != int(self.credentials.login):
             self.logger.error(
                 "Terminal is logged into a different account (expected=%s, actual=%s).",
                 self.credentials.login,
@@ -1133,7 +1142,6 @@ class MT5Connection:
                 mt5.shutdown()
                 return False
 
-        self._account_cache = info
         self._log_account_status(info)
         self.connected = True
         self.logger.info("Attached to authorized terminal session successfully.")
@@ -1157,12 +1165,6 @@ class MT5Connection:
             trade_mode,
             getattr(info, "leverage", "n/a"),
         )
-
-    @staticmethod
-    def _round_price(price: Optional[float], digits: int) -> float:
-        if price is None:
-            return 0.0
-        return round(price, digits)
 
     @staticmethod
     def _round_to_tick(price: Optional[float], digits: int, tick_size: float, mode: str = "nearest") -> float:

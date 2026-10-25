@@ -42,7 +42,6 @@ class TelegramNotifier:
         self._missing_chat_warning_cooldown_seconds = 300
         self._last_update_id = 0
         self._commands: Dict[str, Callable] = {}
-        self._keyboard_handlers: Dict[str, Callable] = {}
     
     def send_trade_execution(self, trade_data: Dict[str, Any]) -> bool:
         """Send trade execution notification"""
@@ -379,12 +378,6 @@ Test Duration: {progress.get('test_days', '0')} days
         url = f"https://api.telegram.org/bot{self.config.bot_token}/sendPhoto"
         
         try:
-            from multipart import MultipartEncoder # I might need to install this or use a simpler way
-            # Since I want to avoid adding too many dependencies, I'll use a simpler way if possible
-            # Actually, I'll just use a basic multipart implementation or a library if needed.
-            # I'll try with a simpler 'requests' based approach if available, but I used urllib.
-            
-            # I'll use 'requests' if available as it handles files much better.
             import requests
             with open(photo_path, 'rb') as f:
                 files = {'photo': f}
@@ -401,10 +394,6 @@ Test Duration: {progress.get('test_days', '0')} days
         if not cmd.startswith("/"):
             cmd = "/" + cmd
         self._commands[cmd] = callback
-
-    def register_keyboard_handler(self, callback_data: str, callback: Callable) -> None:
-        """Register a handler for a custom inline keyboard callback_data string."""
-        self._keyboard_handlers[callback_data] = callback
 
     # ── Inline keyboard helpers ────────────────────────────────────────────────
 
@@ -486,16 +475,6 @@ Test Duration: {progress.get('test_days', '0')} days
                     self.logger.exception("Error in keyboard callback %s: %s", cmd_key, exc)
                     self.send(f"❌ Error: {exc}")
             return
-
-        # Custom handlers registered via register_keyboard_handler()
-        if callback_data in self._keyboard_handlers:
-            try:
-                response = self._keyboard_handlers[callback_data]()
-                if response:
-                    self.send(response)
-            except Exception as exc:
-                self.logger.exception("Error in custom keyboard handler %s: %s", callback_data, exc)
-                self.send(f"❌ Error: {exc}")
 
     def _send_unknown_command_response(self) -> None:
         """Respond to unrecognized input with the interactive menu."""

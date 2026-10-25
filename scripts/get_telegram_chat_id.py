@@ -5,7 +5,6 @@ Helps you find your Chat ID to enable bot notifications.
 """
 
 import os
-import sys
 import time
 import requests
 from dotenv import load_dotenv
@@ -43,7 +42,7 @@ def main():
                         if msg:
                             chat = msg.get("chat")
                             user = msg.get("from")
-                            print(f"\n✅ FOUND CHAT ID!")
+                            print("\n✅ FOUND CHAT ID!")
                             print(f"   Name:    {user.get('first_name')} {user.get('last_name', '')}")
                             print(f"   Username: @{user.get('username', 'N/A')}")
                             print(f"   CHAT ID:  {chat.get('id')}")
@@ -52,7 +51,7 @@ def main():
                             print(f"👉 PASTE IT INTO .env as TELEGRAM_CHAT_ID={chat.get('id')}")
                             print("-" * 60)
                             return
-            except Exception as e:
+            except Exception:
                 pass
             time.sleep(2)
     except KeyboardInterrupt:

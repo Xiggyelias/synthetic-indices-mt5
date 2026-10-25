@@ -1,0 +1,74 @@
+{
+  "system_name": "QUANTA-SYNTH Micro-Account Compounder",
+  "version": "5.0-MICRO",
+  "market_type": "SYNTHETIC_INDICES",
+  "description": "Micro-account $5 -> $1000 compound challenge. Focuses on V75, V50, and Step Index (lowest min lot sizes). Aggressive Half-Kelly compounding on high-conviction setups only.",
+  "active_symbols": [
+    "Volatility 75 Index",
+    "Volatility 50 Index",
+    "Step Index"
+  ],
+  "timeframe": "M5",
+  "lookback_bars": 300,
+  "poll_seconds": 8,
+  "fast_poll_seconds": 4,
+  "slow_poll_seconds": 15,
+  "magic_number": 20260909,
+  "min_math_edge": 65.0,
+  "calculative_brain": {
+    "hurst_anti_persistent_threshold": 0.38,
+    "hurst_persistent_threshold": 0.62,
+    "hurst_min_r_squared": 0.75,
+    "ou_zscore_entry_threshold": 2.0,
+    "shannon_entropy_order_threshold": 0.78,
+    "garman_klass_window": 20,
+    "poisson_hazard_horizon_bars": 5,
+    "kalman_process_noise": 0.0001,
+    "kalman_measurement_noise": 0.01,
+    "kalman_confirm_threshold": 0.8,
+    "adf_critical_value": -2.89,
+    "max_win_probability": 0.9
+  },
+  "risk_management": {
+    "aggressive_mode": true,
+    "fractional_kelly_multiplier": 0.5,
+    "max_risk_per_trade": 0.065,
+    "max_open_trades": 2,
+    "max_drawdown_limit": 0.25,
+    "be_trigger_r": 1.5,
+    "spike_harvest_r": 3.0,
+    "var_emergency_threshold": 7.0,
+    "kalman_trail_enable": true
+  },
+  "micro_account_notes": {
+    "starting_balance": 5.0,
+    "target_balance": 1000.0,
+    "growth_multiplier": 200,
+    "tradeable_symbols": [
+      "Volatility 75 Index",
+      "Volatility 50 Index",
+      "Step Index"
+    ],
+    "reason": "Only these 3 symbols have min lot sizes small enough for $5. V75 min=0.001, V50 min=0.001, Step min=0.10. Other instruments require minimum lots that would risk >100% of account.",
+    "scaling_plan": "As balance grows past $50, unlock Crash 300 + Boom 300. Past $200, unlock all 14 instruments."
+  },
+  "trade_holding": {
+    "runner_strategies": [
+      "FRACTAL_MOMENTUM"
+    ],
+    "runner_close_fraction": 0.5,
+    "runner_lock_r": 0.25,
+    "trail_atr_mult": 3.0,
+    "max_hold_hours": 0,
+    "thesis_exit_enabled": true,
+    "extend_targets": true,
+    "pyramid_enabled": true,
+    "pyramid_max_adds": 2,
+    "_notes": "Runner trades keep the broker TP at TP2, bank runner_close_fraction at TP1, then trail best price - trail_atr_mult x ATR(14). max_hold_hours 0 = unlimited. For multi-day holds use timeframe H1. Each new candle the entry thesis is re-checked: broken -> exit, intact -> keep holding and push the runner target out. Pyramiding adds a position only when every existing leg has its stop locked in profit; adds count toward max_open_trades."
+  },
+  "calibration": {
+    "enabled": true,
+    "path": "data/synthetic_calibration.json",
+    "_notes": "After each closed trade the bot compares the win probability it claimed with the result, per strategy, and scales future claims (shrunk toward 1.0 by 20 pseudo-trades)."
+  }
+}

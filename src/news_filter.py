@@ -316,7 +316,6 @@ class NewsFilter:
             if time_diff <= window:
                 title = str(ev.get("title", "") or ev.get("event", "") or "news")
                 details = self._format_event_details(ev)
-                source_url = str(ev.get("source_url", "") or self._cache_source or self.config.url or "")
                 remaining_mins = (window - time_diff).total_seconds() / 60.0
                 self.logger.warning(
                     "[NEWS_FILTER_BLOCKED] %s | EVENT=%s | CURRENCY=%s | IMPACT=%s | TIME=%s | REMAINING_MINS=%.1f | DETAILS=%s",

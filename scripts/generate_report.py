@@ -5,11 +5,9 @@ Generates an equity curve plot and performance summary.
 """
 
 import os
-import sys
 import json
 import pandas as pd
 import matplotlib.pyplot as plt
-from datetime import datetime
 
 def generate_report(state_path="data/trades_state.json", output_path="logs/performance_report.png"):
     if not os.path.exists(state_path):
@@ -41,7 +39,7 @@ def generate_report(state_path="data/trades_state.json", output_path="logs/perfo
     # Plotting
     plt.figure(figsize=(12, 6))
     plt.plot(df['equity'], marker='o', linestyle='-', color='#2ecc71', linewidth=2)
-    plt.title('Bot Equity Curve - Multi-Symbol H4', fontsize=16, fontweight='bold')
+    plt.title('Bot Equity Curve - RSI-Pullback H1', fontsize=16, fontweight='bold')
     plt.xlabel('Trade Number', fontsize=12)
     plt.ylabel('Equity ($)', fontsize=12)
     plt.grid(True, linestyle='--', alpha=0.7)

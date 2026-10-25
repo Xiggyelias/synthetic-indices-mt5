@@ -8,7 +8,6 @@ import os
 import sys
 import subprocess
 import logging
-from datetime import datetime
 
 def setup_logging():
     """Setup logging for timezone setup"""

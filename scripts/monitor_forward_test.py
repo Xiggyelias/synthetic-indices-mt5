@@ -6,11 +6,9 @@ Real-time monitoring of MT5 Bot forward-testing progress
 
 import os
 import sys
-import json
 import time
-from datetime import datetime, timedelta
-from pathlib import Path
-import pandas as pd
+from datetime import datetime
+from typing import Optional
 try:
     from tabulate import tabulate
 except Exception:  # pragma: no cover
@@ -26,7 +24,7 @@ from dotenv import load_dotenv
 class ForwardTestMonitor:
     """Real-time forward-test monitoring dashboard"""
     
-    def __init__(self):
+    def __init__(self, tracker: Optional[ForwardTestTracker] = None):
         self.logger = self._setup_logger()
         load_dotenv()
         
@@ -35,7 +33,7 @@ class ForwardTestMonitor:
         self.telegram_notifier = TelegramNotifier(telegram_config) if telegram_config.enabled else None
         
         # Initialize forward-test tracker
-        self.tracker = ForwardTestTracker(telegram_notifier=self.telegram_notifier)
+        self.tracker = tracker or ForwardTestTracker(telegram_notifier=self.telegram_notifier)
         
         # Target metrics from calibrated RSI-Pullback champion setup
         self.target_metrics = {
@@ -251,6 +249,21 @@ class ForwardTestMonitor:
     
     def _generate_summary_report(self, metrics):
         """Generate summary report"""
+        if metrics.get('total_trades', 0) == 0:
+            report = f"""
+📊 FORWARD-TEST SUMMARY REPORT
+Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+Test Duration: {(datetime.now() - self.tracker.start_date).days} days
+
+STATUS:
+ℹ️ No completed trades recorded yet.
+
+PROGRESS:
+Target: 0/{self.target_metrics['target_trades']} trades
+Status: 🔄 IN PROGRESS
+"""
+            return report.strip()
+
         report = f"""
 📊 FORWARD-TEST SUMMARY REPORT
 Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
@@ -279,6 +292,19 @@ Status: {'✅ COMPLETE' if metrics['target_completion'] else '🔄 IN PROGRESS'}
     
     def _generate_evaluation_report(self, metrics):
         """Generate Go/No-Go evaluation report"""
+        if metrics.get('total_trades', 0) == 0:
+            report = f"""
+🎯 GO/NO-GO EVALUATION REPORT
+Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+
+STATUS:
+ℹ️ No completed trades recorded yet. Minimum {self.target_metrics['target_trades']} completed trades required for evaluation.
+
+RECOMMENDATION:
+🔄 IN PROGRESS - Awaiting trade execution and closure
+"""
+            return report.strip()
+
         report = f"""
 🎯 GO/NO-GO EVALUATION REPORT
 Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}

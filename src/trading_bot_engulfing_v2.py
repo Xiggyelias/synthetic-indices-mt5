@@ -16,11 +16,10 @@ Version: 2.0.0
 
 import pandas as pd
 import numpy as np
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Dict, List, Tuple, Optional
 from dataclasses import dataclass, field
 from enum import Enum
-import json
 import warnings
 from market_regime import MarketRegime
 warnings.filterwarnings('ignore')
@@ -41,6 +40,9 @@ class TimeFrame(Enum):
 @dataclass
 class TradingConfig:
     """Configuration for the trading bot v2.0"""
+    enabled: bool = True
+    allowed_directions: List[str] = field(default_factory=lambda: ["buy", "sell"])
+
     # Risk Management
     risk_per_trade: float = 0.01
     min_risk_reward: float = 0.28          # FIX: was 2.2 — small TP/SL is achievable (78%+ breakeven WR)
@@ -48,6 +50,8 @@ class TradingConfig:
     capital_allocation: float = 0.0
     max_risk_per_trade: float = 0.02
     max_total_open_risk: float = 0.075    # FIX: was 0.005 — allow up to 3 concurrent trades
+    max_net_currency_risk: float = 0.025  # Portfolio innovation: 2.5% max directional risk per currency
+    stagnation_bars: int = 10             # Trade lifecycle innovation: time-decay stop at N bars
     max_open_trades: int = 3
     max_open_trades_per_symbol: int = 2
     max_open_trades_per_direction: int = 2
@@ -535,16 +539,16 @@ class EngulfingBotV2:
     
     def check_volume(self, df: pd.DataFrame, idx: int) -> bool:
         """
-        UPGRADED: Doubled volume requirement
+        UPGRADED: Volume requirement
         Only trade on heavyweight institutional moves
         """
         curr = df.iloc[idx]
-        
-        if pd.isna(curr['Volume_Avg']):
+        vol_avg = curr.get('Volume_Avg')
+        if vol_avg is None or pd.isna(vol_avg):
             return True
         
-        # UPGRADED: 2.0x multiplier for conviction
-        return curr['volume'] >= curr['Volume_Avg'] * self.config.volume_multiplier
+        vol = curr.get('volume', 0)
+        return float(vol) >= float(vol_avg) * self.config.volume_multiplier
     
     def is_near_support_resistance(self, df: pd.DataFrame, idx: int, signal: Signal) -> bool:
         """
@@ -555,15 +559,17 @@ class EngulfingBotV2:
         tolerance = self.config.sr_tolerance  # Now 0.001 (0.1%)
         
         if signal == Signal.BUY:
-            if pd.isna(curr['Support']):
+            sup = curr.get('Support')
+            if sup is None or pd.isna(sup):
                 return True
-            distance = abs(curr['low'] - curr['Support']) / curr['Support']
+            distance = abs(curr['low'] - sup) / sup if sup > 0 else 1.0
             return distance <= tolerance
         
         elif signal == Signal.SELL:
-            if pd.isna(curr['Resistance']):
+            res = curr.get('Resistance')
+            if res is None or pd.isna(res):
                 return True
-            distance = abs(curr['high'] - curr['Resistance']) / curr['Resistance']
+            distance = abs(curr['high'] - res) / res if res > 0 else 1.0
             return distance <= tolerance
         
         return True
@@ -672,6 +678,48 @@ class EngulfingBotV2:
                     
         return False
 
+    def check_liquidity_sweep(self, df: pd.DataFrame, idx: int, signal: Signal, lookback: int = 10) -> bool:
+        """
+        Institutional Liquidity Sweep / Turtle Soup detection:
+        - For BUY: Candle low pierced below the swing low of the previous N bars (sweeping resting sell-stops)
+          and closed back above that swing low (liquidity grab & reclaim).
+        - For SELL: Candle high pierced above the swing high of the previous N bars (sweeping resting buy-stops)
+          and closed back below that swing high (liquidity grab & reclaim).
+        """
+        if idx < 5:
+            return False
+        effective_lookback = min(lookback, idx - 1)
+        curr = df.iloc[idx]
+        prev = df.iloc[idx - 1]
+        prior_range = df.iloc[max(0, idx - effective_lookback):idx - 1]
+        if prior_range.empty:
+            return False
+
+        if signal == Signal.BUY:
+            prior_low = float(prior_range['low'].min())
+            wicked_below = float(curr['low']) < prior_low or float(prev['low']) < prior_low
+            reclaimed = float(curr['close']) > prior_low
+            return wicked_below and reclaimed
+        else:
+            prior_high = float(prior_range['high'].max())
+            wicked_above = float(curr['high']) > prior_high or float(prev['high']) > prior_high
+            reclaimed = float(curr['close']) < prior_high
+            return wicked_above and reclaimed
+
+    def check_market_efficiency(self, df: pd.DataFrame, idx: int, period: int = 10, min_ker: float = 0.35) -> bool:
+        """Kaufman Efficiency Ratio >= min_ker ensures market is in a clean impulse, not chop."""
+        if idx < period + 1:
+            return True
+        series = df['close'].iloc[max(0, idx - period - 1):idx + 1]
+        if len(series) < period + 1:
+            return True
+        net_change = abs(float(series.iloc[-1]) - float(series.iloc[0]))
+        sum_abs_changes = float(series.diff().abs().iloc[1:].sum())
+        if sum_abs_changes <= 0:
+            return False
+        ker = net_change / sum_abs_changes
+        return ker >= min_ker
+
     def calculate_trade_score(
         self, 
         df: pd.DataFrame, 
@@ -716,24 +764,30 @@ class EngulfingBotV2:
         
         # VOLATILITY (+1/-1)
         score += -1 if is_volatile else 1
+
+        # INSTITUTIONAL LIQUIDITY SWEEP BONUS (+1)
+        if self.check_liquidity_sweep(df, idx, signal):
+            score += 1
         
         return max(0, min(10, score))
 
     def confluence_score(self, df: pd.DataFrame, idx: int, signal: Signal, regime: MarketRegime = MarketRegime.TRENDING) -> Tuple[int, Dict[str, bool]]:
-        """Calculate confluence score: count how many signals align"""
+        """Calculate confluence score: count how many signals align (14-factor institutional model)"""
         signals = {
-            "key_level":       self.is_near_support_resistance(df, idx, signal),
-            "volume":          self.check_volume(df, idx),
-            "momentum_rsi":    self.check_rsi(df, idx, signal),
-            "candlestick":     True,  # Already confirmed engulfing before scoring
-            "ema_alignment":   self.check_strict_trend(df, idx, signal) if regime == MarketRegime.TRENDING else True,
-            "structure_break": self.check_structure_break(df, idx, signal),
-            "macd":            self.check_macd_confluence(df, idx, signal),
-            "stochastic":      self.check_stochastic_confluence(df, idx, signal),
-            "ema20":           self.check_ema20_alignment(df, idx, signal) if regime == MarketRegime.TRENDING else True,
-            "rsi_pullback":    self.check_rsi_pullback(df, idx, signal) if self.config.rsi_pullback_enabled else True,
-            "fvg_confluence":  self.check_fvg_confluence(df, idx, signal),
-            "adx_trend":       self.check_adx_strength(df, idx),   # ADX ≥ 20 edge
+            "key_level":         self.is_near_support_resistance(df, idx, signal),
+            "volume":            self.check_volume(df, idx),
+            "momentum_rsi":      self.check_rsi(df, idx, signal),
+            "candlestick":       True,  # Already confirmed engulfing before scoring
+            "ema_alignment":     self.check_strict_trend(df, idx, signal) if regime == MarketRegime.TRENDING else True,
+            "structure_break":   self.check_structure_break(df, idx, signal),
+            "macd":              self.check_macd_confluence(df, idx, signal),
+            "stochastic":        self.check_stochastic_confluence(df, idx, signal),
+            "ema20":             self.check_ema20_alignment(df, idx, signal) if regime == MarketRegime.TRENDING else True,
+            "rsi_pullback":      self.check_rsi_pullback(df, idx, signal) if self.config.rsi_pullback_enabled else True,
+            "fvg_confluence":    self.check_fvg_confluence(df, idx, signal),
+            "adx_trend":         self.check_adx_strength(df, idx),   # ADX ≥ 20 edge
+            "liquidity_sweep":   self.check_liquidity_sweep(df, idx, signal),
+            "market_efficiency": self.check_market_efficiency(df, idx),
         }
         score = sum(1 for v in signals.values() if v)
         return score, signals
@@ -800,6 +854,9 @@ class EngulfingBotV2:
         UPGRADED: Generate signal with liquidity checks and scoring
         Returns: (Signal, score, risk_fraction_multiplier)
         """
+        if not bool(getattr(self.config, "enabled", True)):
+            return None, 0, 0.0
+
         is_bullish = self.is_bullish_engulfing(df, idx)
         is_bearish = self.is_bearish_engulfing(df, idx)
 
@@ -810,6 +867,14 @@ class EngulfingBotV2:
             return None, 0, 0.0
 
         signal = Signal.BUY if is_bullish else Signal.SELL
+        allowed = {
+            str(direction).strip().lower()
+            for direction in getattr(self.config, "allowed_directions", ["buy", "sell"])
+        }
+        if signal == Signal.BUY and "buy" not in allowed:
+            return None, 0, 0.0
+        if signal == Signal.SELL and "sell" not in allowed:
+            return None, 0, 0.0
         
         # NEW: Liquidity Hunting Check
         if self.check_liquidity_hunting(df, idx, signal):
@@ -857,22 +922,6 @@ class EngulfingBotV2:
         if self.current_capital < self.peak_capital * (1 - self.config.max_drawdown):
             return True
         return False
-    
-    def check_trend_alignment(self, df: pd.DataFrame, idx: int, signal: Signal) -> bool:
-        """Check if price is properly aligned with 200 EMA trend"""
-        curr = df.iloc[idx]
-        ema200 = curr.get('EMA_200')
-        close_price = curr['close']
-        
-        if ema200 is None or pd.isna(ema200):
-            return False
-        
-        if signal == Signal.BUY:
-            # For longs, price must be above 200 EMA
-            return float(close_price) > float(ema200)
-        else:
-            # For shorts, price must be below 200 EMA
-            return float(close_price) < float(ema200)
     
     def manage_open_trades(
         self,
@@ -1089,6 +1138,10 @@ class EngulfingBotV2:
         print(f"Volume Requirement: {self.config.volume_multiplier}x average")
         print(f"S/R Tolerance: {self.config.sr_tolerance*100}%")
         print("-" * 60)
+
+        if not bool(getattr(self.config, "enabled", True)):
+            print("Backtest skipped: strategy disabled for this symbol/config.")
+            return self.calculate_statistics()
         
         df = self.calculate_indicators(df)
         start_idx = max(self.config.ema_slow, self.config.sr_lookback) + 1
@@ -1118,6 +1171,9 @@ class EngulfingBotV2:
             mr = self._backtest_regime_to_enum(current_regime)
             ts = df.index[idx]
             is_ln = self._backtest_is_london_ny(ts)
+            if not is_ln:
+                self.equity_curve.append(self.current_capital)
+                continue
 
             is_bull = self.is_bullish_engulfing(df, idx)
             is_bear = self.is_bearish_engulfing(df, idx)
@@ -1347,125 +1403,6 @@ class EngulfingBotV2:
             'regime_breakdown': regime_breakdown,
         }
     
-    def print_statistics(self, stats: Dict):
-        """Print formatted statistics"""
-        print("\n" + "=" * 60)
-        print(f"BACKTEST RESULTS - {self.config.strategy_mode}")
-        print("=" * 60)
-        
-        print(f"\n📊 TRADE STATISTICS")
-        print(f"Total Trades:      {stats['total_trades']}")
-        print(f"Winning Trades:    {stats['winning_trades']}")
-        print(f"Losing Trades:     {stats['losing_trades']}")
-        print(f"Win Rate:          {stats['win_rate']:.2f}%")
-        print(f"Avg RSI at Entry:  {stats['avg_rsi_at_entry']:.1f}")
-        
-        print(f"\n💰 PROFIT/LOSS")
-        print(f"Total Profit:      ${stats['total_profit']:,.2f}")
-        print(f"Total Loss:        ${stats['total_loss']:,.2f}")
-        print(f"Net Profit:        ${stats['net_profit']:,.2f}")
-        print(f"Return:            {stats['return_pct']:.2f}%")
-        
-        print(f"\n📈 PERFORMANCE METRICS")
-        print(f"Profit Factor:     {stats['profit_factor']:.2f}")
-        print(f"Average Win:       ${stats['average_win']:,.2f}")
-        print(f"Average Loss:      ${stats['average_loss']:,.2f}")
-        print(f"Expectancy:        ${stats['expectancy']:,.2f}")
-        print(f"Max Drawdown:      {stats['max_drawdown']:.2f}%")
-        
-        print(f"\n💼 CAPITAL")
-        print(f"Initial Capital:   ${self.config.initial_capital:,.2f}")
-        print(f"Final Capital:     ${stats['final_capital']:,.2f}")
-        
-        print("\n" + "=" * 60)
-    
-    def export_trades(self, filename: str = "trade_log_v2.csv"):
-        """Export trade log to CSV"""
-        if not self.trades:
-            print("No trades to export")
-            return
-        
-        trade_data = []
-        for trade in self.trades:
-            trade_data.append({
-                'Entry Time': trade.entry_time,
-                'Entry Price': trade.entry_price,
-                'Direction': 'BUY' if trade.direction == Signal.BUY else 'SELL',
-                'RSI at Entry': trade.rsi_at_entry,
-                'Stop Loss': trade.stop_loss,
-                'Take Profit': trade.take_profit,
-                'Position Size': trade.position_size,
-                'Exit Time': trade.exit_time,
-                'Exit Price': trade.exit_price,
-                'Profit/Loss': trade.profit_loss,
-                'Status': trade.status
-            })
-        
-        df_trades = pd.DataFrame(trade_data)
-        df_trades.to_csv(filename, index=False)
-        print(f"\n✅ Trade log exported to {filename}")
-
-
-def generate_sample_data(days: int = 365, timeframe: TimeFrame = TimeFrame.H1) -> pd.DataFrame:
-    """Generate realistic sample OHLCV data for backtesting"""
-    print(f"Generating {days} days of sample data ({timeframe.value} timeframe)...")
-    
-    candles_per_day = {
-        TimeFrame.M5: 288,
-        TimeFrame.M15: 96,
-        TimeFrame.H1: 24,
-        TimeFrame.H4: 6
-    }
-    
-    num_candles = days * candles_per_day[timeframe]
-    
-    freq_map = {
-        TimeFrame.M5: '5min',
-        TimeFrame.M15: '15min',
-        TimeFrame.H1: '1h',
-        TimeFrame.H4: '4h'
-    }
-    
-    dates = pd.date_range(end=datetime.now(), periods=num_candles, freq=freq_map[timeframe])
-    
-    np.random.seed(42)
-    price = 100.0
-    prices = [price]
-    
-    trend = 0.0001
-    volatility = 0.015
-    
-    for i in range(1, num_candles):
-        change = trend + np.random.normal(0, volatility)
-        if i % 100 == 0:
-            change += (100 - price) * 0.001
-        price = price * (1 + change)
-        prices.append(price)
-    
-    close = np.array(prices)
-    high = close * (1 + np.abs(np.random.normal(0, 0.005, num_candles)))
-    low = close * (1 - np.abs(np.random.normal(0, 0.005, num_candles)))
-    open_prices = np.roll(close, 1)
-    open_prices[0] = close[0]
-    open_prices = open_prices * (1 + np.random.normal(0, 0.001, num_candles))
-    
-    high = np.maximum(high, np.maximum(open_prices, close))
-    low = np.minimum(low, np.minimum(open_prices, close))
-    
-    price_range = high - low
-    volume = np.random.lognormal(10, 1, num_candles) * (1 + price_range / close * 10)
-    
-    df = pd.DataFrame({
-        'open': open_prices,
-        'high': high,
-        'low': low,
-        'close': close,
-        'volume': volume
-    }, index=dates)
-    
-    return df
-
-
 if __name__ == "__main__":
     print("="*60)
     print("ENGULFING BOT V2.0 - RSI-PULLBACK STRATEGY")

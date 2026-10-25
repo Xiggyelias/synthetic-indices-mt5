@@ -11,7 +11,6 @@ import json
 import logging
 import os
 from contextlib import contextmanager
-from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger("database")
@@ -371,27 +370,6 @@ class DatabaseManager:
             return cur.fetchall()
 
     # ── bot state (k/v store) ─────────────────────────────────────────────────
-    def set_state(self, key: str, value: Any) -> None:
-        sql = """
-            INSERT INTO bot_state (state_key, state_value)
-            VALUES (%s, %s)
-            ON DUPLICATE KEY UPDATE state_value = VALUES(state_value)
-        """
-        with self.cursor() as cur:
-            cur.execute(sql, (key, json.dumps(value)))
-
-    def get_state(self, key: str, default: Any = None) -> Any:
-        sql = "SELECT state_value FROM bot_state WHERE state_key = %s"
-        with self.cursor() as cur:
-            cur.execute(sql, (key,))
-            row = cur.fetchone()
-        if row is None:
-            return default
-        val = row["state_value"]
-        if isinstance(val, str):
-            return json.loads(val)
-        return val
-
     # ── performance summary ───────────────────────────────────────────────────
     def get_win_rate(self, period_days: int = 30) -> Optional[float]:
         sql = """

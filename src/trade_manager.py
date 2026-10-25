@@ -48,10 +48,13 @@ class TradeManager:
         self.closed_trades: List[dict] = []
 
     def load(self) -> None:
-        if not os.path.exists(self.state_path):
+        if not os.path.exists(self.state_path) or os.path.getsize(self.state_path) == 0:
             return
-        with open(self.state_path, "r", encoding="utf-8") as f:
-            raw = json.load(f)
+        try:
+            with open(self.state_path, "r", encoding="utf-8") as f:
+                raw = json.load(f) or {}
+        except Exception:
+            return
         self.meta = (raw or {}).get("meta", {}) or {}
         open_raw = (raw or {}).get("open_trades", {}) or {}
         self.open_trades = {}
