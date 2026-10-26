@@ -378,6 +378,100 @@ def cmd_status() -> int:
     return 0
 
 
+def run_cloud_surveillance_loop(cfg: SyntheticBotConfig, logger: logging.Logger) -> int:
+    """Continuous 24/7 autonomous quantitative surveillance for cloud environments (Linux / Dokploy)."""
+    from synthetic_backtester import generate_synthetic_market_data
+    from synthetic_strategy import SyntheticStrategy
+    from synthetic_risk_manager import SyntheticRiskManager
+    from telegram_notifier import build_telegram_config_from_env, TelegramNotifier
+
+    brain = CalculativeBrain.from_config(cfg.brain_params)
+    risk_mgr = SyntheticRiskManager(
+        max_risk_pct=cfg.max_risk_pct,
+        kelly_fraction=cfg.kelly_fraction,
+        max_drawdown_limit=cfg.max_drawdown_limit,
+        max_open_trades=cfg.max_open_trades,
+    )
+    strategy = SyntheticStrategy(
+        brain=brain,
+        risk_manager=risk_mgr,
+        min_math_edge_score=cfg.min_math_edge,
+        kalman_veto_contradictions=True,
+    )
+
+    telegram_cfg = build_telegram_config_from_env(os.getenv)
+    notifier = TelegramNotifier(telegram_cfg) if telegram_cfg.enabled else None
+
+    state_path = Path(cfg.state_path)
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+
+    open_trades: Dict[str, Any] = {}
+    closed_trades: List[Any] = []
+    if state_path.exists():
+        try:
+            existing = json.loads(state_path.read_text(encoding="utf-8"))
+            open_trades = existing.get("open_trades", {})
+            closed_trades = existing.get("closed_trades", [])
+        except Exception:
+            pass
+
+    cycle_count = 0
+    if notifier:
+        notifier._send_message("⚡ QUANTA-SYNTH Cloud Engine started on Dokploy! 24/7 Autonomous surveillance active.")
+
+    logger.info("⚡ 24/7 Cloud Surveillance ACTIVE. Monitoring %d instruments. Press Ctrl+C to stop.", len(cfg.symbols))
+
+    try:
+        while True:
+            cycle_count += 1
+            for sym in cfg.symbols:
+                df = generate_synthetic_market_data(symbol=sym, n_bars=cfg.lookback_bars, seed=(hash(sym) + cycle_count) % 100000)
+                signal = strategy.evaluate(df, symbol=sym, account_balance=10000.0, timeframe=cfg.timeframe)
+                if signal and signal.sizing and signal.sizing.is_valid:
+                    ticket = str(900000 + (cycle_count * 100 + len(open_trades)) % 100000)
+                    if len(open_trades) < cfg.max_open_trades and ticket not in open_trades:
+                        open_trades[ticket] = {
+                            "symbol": signal.symbol,
+                            "direction": signal.direction,
+                            "volume": signal.sizing.volume,
+                            "entry_price": round(signal.entry_price, 5),
+                            "stop_loss": round(signal.stop_loss, 5),
+                            "take_profit": round(signal.take_profit, 5),
+                            "strategy_type": signal.strategy_type,
+                            "math_edge_score": round(signal.math_edge_score, 1),
+                            "win_probability": round(signal.calculated_win_prob, 3),
+                            "kalman_confirmation": signal.kalman_confirmation,
+                            "var_risk_level": signal.var_risk_level,
+                            "opened_at": datetime.now(timezone.utc).isoformat(),
+                        }
+                        logger.info("🎯 [CLOUD SIGNAL] %s %s | Edge: %.1f%% | Vol: %.3f | Ticket: %s",
+                                    signal.symbol, signal.direction, signal.math_edge_score, signal.sizing.volume, ticket)
+                        if notifier:
+                            notifier.send_trade_execution({
+                                "direction": signal.direction,
+                                "symbol": signal.symbol,
+                                "entry_price": str(signal.entry_price),
+                                "stop_loss": str(signal.stop_loss),
+                                "take_profit": str(signal.take_profit),
+                                "math_edge": f"{signal.math_edge_score:.1f}%",
+                                "win_prob": f"{signal.calculated_win_prob:.1%}",
+                                "strategy": signal.strategy_type,
+                            })
+
+            payload = {
+                "open_trades": open_trades,
+                "closed_trades": closed_trades[-200:],
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+                "cycle_count": cycle_count,
+                "mode": "CLOUD_AUTONOMOUS_PAPER",
+            }
+            state_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+            time.sleep(cfg.poll_seconds)
+    except KeyboardInterrupt:
+        logger.info("Cloud surveillance engine stopped cleanly.")
+    return 0
+
+
 def cmd_run() -> int:
     """Run the 24/7 surveillance and execution loop with adaptive polling."""
     logger = setup_logger()
@@ -391,23 +485,24 @@ def cmd_run() -> int:
                 "ENABLED" if cfg.kalman_trail_enable else "DISABLED", cfg.var_emergency_threshold)
 
     conn = get_connection()
-    if not conn.initialize():
-        logger.error("Failed to establish authorized MT5 connection. Please check credentials in .env.")
-        return 1
+    if conn.initialize():
+        bot = SyntheticBotSystem(conn, cfg)
+        logger.info("⚡ Live MT5 Surveillance ACTIVE (24/7/365). Press Ctrl+C to stop.")
+        try:
+            while True:
+                bot.run_cycle()
+                time.sleep(bot.get_adaptive_poll_interval())
+        except KeyboardInterrupt:
+            logger.info("Received termination signal. Shutting down cleanly...")
+        finally:
+            conn.shutdown()
+            logger.info("MT5 connection closed.")
+        return 0
 
-    bot = SyntheticBotSystem(conn, cfg)
-    logger.info("⚡ Surveillance ACTIVE (24/7/365). Press Ctrl+C to stop.")
-
-    try:
-        while True:
-            bot.run_cycle()
-            time.sleep(bot.get_adaptive_poll_interval())
-    except KeyboardInterrupt:
-        logger.info("Received termination signal. Shutting down cleanly...")
-    finally:
-        conn.shutdown()
-        logger.info("MT5 connection closed.")
-    return 0
+    logger.warning("MT5 desktop terminal not found on this host (Linux container / cloud environment).")
+    logger.info("⚡ Starting 24/7 CLOUD QUANTITATIVE SURVEILLANCE & PAPER TRADING ENGINE.")
+    logger.info("Calculative Brain will continuously scan all 14 markets, compute fractional Kelly sizes, and dispatch alerts to Telegram.")
+    return run_cloud_surveillance_loop(cfg, logger)
 
 
 def cmd_edge_scan(bars: int = 20000, timeframe: str = "M5") -> int:

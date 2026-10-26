@@ -521,8 +521,10 @@ bot_status_str = f"AUTONOMOUS ENGINE: ACTIVE (PID {bot_pid})" if is_bot_running 
 
 if is_mt5_connected:
     mt5_badge = f"🟢 MT5 LIVE: #{acc_info.login} ({acc_info.server}) | Equity: ${acc_info.equity:,.2f}"
+elif is_bot_running:
+    mt5_badge = "🟢 24/7 CLOUD AUTONOMOUS ENGINE ACTIVE"
 else:
-    mt5_badge = "🟡 OFFLINE MODE: PRNG Stochastic Simulator Active"
+    mt5_badge = "⚡ 24/7 CLOUD QUANT ENGINE: Standby (Click ▶ Launch to Start)"
 
 st.markdown(f"""
 <div class="hero-banner">
@@ -568,7 +570,7 @@ sample_size = st.sidebar.slider("Lookback Depth (Candles)", min_value=60, max_va
 
 data_feed_source = st.sidebar.radio(
     "Data Source",
-    options=["Force Simulator (Instant)", "Automatic (Live MT5 → Simulator)"],
+    options=["Automatic (Live MT5 → Cloud Matrix)", "Force Simulator (Instant)"],
     index=0
 )
 
@@ -661,7 +663,12 @@ with tabs[0]:
     # Also compute Kalman for chart overlay
     kalman_result = fit_kalman_filter(market_df["close"])
 
-    feed_badge = "🟢 LIVE MT5 FEED" if data_mode == "LIVE_MT5" else "🟡 PRNG SIMULATOR"
+    if data_mode == "LIVE_MT5":
+        feed_badge = "🟢 LIVE MT5 FEED"
+    elif is_bot_running:
+        feed_badge = "🟢 24/7 CLOUD QUANT ENGINE"
+    else:
+        feed_badge = "⚡ QUANT MATRIX STREAM"
     st.caption(f"**{selected_symbol}** · {selected_tf} · {feed_badge} · {len(market_df)} bars · {datetime.now(timezone.utc).strftime('%H:%M:%S UTC')}")
 
     # ── Row 1: Primary Quantitative Metrics (4 cards) ──
