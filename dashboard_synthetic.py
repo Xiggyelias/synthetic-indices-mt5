@@ -616,7 +616,11 @@ def get_cached_bot_status() -> Tuple[bool, Optional[int]]:
 
 
 def launch_autonomous_bot() -> Optional[int]:
-    """Launch synthetic_bot.py as a 24/7 background process and record PID."""
+    """Launch synthetic_bot.py as a 24/7 background process and clear manual stop flag."""
+    stop_flag = ROOT / "data" / "engine_manual_stop.flag"
+    stop_flag.unlink(missing_ok=True)
+    st.session_state["manual_engine_stopped"] = False
+
     try:
         log_dir = ROOT / "logs"
         log_dir.mkdir(parents=True, exist_ok=True)
@@ -642,34 +646,68 @@ def launch_autonomous_bot() -> Optional[int]:
 
 
 def kill_autonomous_bot() -> bool:
-    """Safely terminate synthetic_bot.py process and clean PID file."""
+    """Safely terminate synthetic_bot.py process, kill all children, and set manual stop flag."""
+    stop_flag = ROOT / "data" / "engine_manual_stop.flag"
+    stop_flag.parent.mkdir(parents=True, exist_ok=True)
+    stop_flag.touch(exist_ok=True)
+    st.session_state["manual_engine_stopped"] = True
+
     pid_file = ROOT / "data" / "synthetic_bot.pid"
-    killed = False
+    killed_pids = set()
+
     if pid_file.exists():
         try:
             pid = int(pid_file.read_text(encoding="utf-8").strip())
+            killed_pids.add(pid)
             p = psutil.Process(pid)
+            for child in p.children(recursive=True):
+                try:
+                    child.kill()
+                except Exception:
+                    pass
             p.terminate()
             try:
-                p.wait(timeout=2)
+                p.wait(timeout=1.0)
             except Exception:
                 p.kill()
-            killed = True
-        except Exception:
+        except (psutil.NoSuchProcess, psutil.AccessDenied, ValueError):
             pass
         pid_file.unlink(missing_ok=True)
-    bot_proc = get_bot_process()
-    if bot_proc and not killed:
-        try:
-            bot_proc.terminate()
-            bot_proc.wait(timeout=2)
-        except Exception:
+
+    # Sweep any remaining synthetic_bot instances
+    try:
+        for proc in psutil.process_iter(["pid", "cmdline"]):
             try:
-                bot_proc.kill()
-            except Exception:
-                pass
+                cmd = proc.info.get("cmdline") or []
+                cmd_str = " ".join(cmd).lower()
+                if "synthetic_bot.py" in cmd_str and proc.pid not in killed_pids:
+                    proc.terminate()
+                    try:
+                        proc.wait(timeout=1.0)
+                    except Exception:
+                        proc.kill()
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                continue
+    except Exception:
+        pass
+
     st.cache_data.clear()
     return True
+
+
+def sync_market_stream(sym: str, tf: str, count: int) -> bool:
+    """Actively pull fresh candle data directly from Deriv WebSocket and flush connection cache."""
+    st.session_state.pop("mt5_conn_cached", None)
+    st.cache_data.clear()
+    try:
+        from deriv_web_feed import get_deriv_live_candles
+        fresh = get_deriv_live_candles(sym, tf, count)
+        if fresh is not None and len(fresh) >= 30:
+            st.session_state["forced_fresh_df"] = fresh
+            return True
+    except Exception as exc:
+        logging.getLogger("dashboard").debug(f"Sync error: {exc}")
+    return False
 
 
 def is_terminal_running() -> bool:
@@ -758,9 +796,10 @@ def archetype_badge(archetype: str) -> str:
 # ── Top Telemetry & Unified Command Bar ───────────────────────────────────────
 
 is_bot_running, bot_pid = get_cached_bot_status()
+stop_flag = ROOT / "data" / "engine_manual_stop.flag"
 
-# Auto-start 24/7 autonomous bot if in cloud container and not yet active
-if not is_bot_running and os.getenv("AUTONOMOUS_AUTOSTART", "true").lower() == "true":
+# Auto-start 24/7 autonomous bot if enabled and NOT manually stopped
+if not is_bot_running and not stop_flag.exists() and not st.session_state.get("manual_engine_stopped", False) and os.getenv("AUTONOMOUS_AUTOSTART", "true").lower() == "true":
     bot_pid = launch_autonomous_bot()
     is_bot_running = bot_pid is not None
 
@@ -906,7 +945,12 @@ auto_refresh = st.sidebar.selectbox("Auto-Refresh Interval", ["Off", "10 seconds
 market_df: Optional[pd.DataFrame] = None
 data_mode = "SIMULATED"
 
-if data_feed_source.startswith("Automatic") and conn:
+# Check if Sync Stream provided fresh live candles
+if "forced_fresh_df" in st.session_state and st.session_state["forced_fresh_df"] is not None:
+    market_df = st.session_state.pop("forced_fresh_df")
+    data_mode = "LIVE_DERIV_WEB"
+
+if market_df is None and data_feed_source.startswith("Automatic") and conn:
     try:
         resolved_sym = conn.ensure_symbol(selected_symbol)
         if resolved_sym:
@@ -975,19 +1019,26 @@ with tabs[0]:
         st.caption(f"**{selected_symbol}** · {selected_tf} · {feed_badge} · {len(market_df)} Live Bars · Synced: {datetime.now(timezone.utc).strftime('%H:%M:%S UTC')}")
     with sync_c2:
         if st.button("🔄 Sync Stream", key="sync_now_btn", type="primary", use_container_width=True):
+            with st.spinner("Connecting to Deriv Cloud & fetching latest candles..."):
+                ok = sync_market_stream(selected_symbol, selected_tf, sample_size)
+            if ok:
+                st.toast(f"🟢 Synchronized live {selected_symbol} feed!", icon="⚡")
+            else:
+                st.toast("Synchronizing connection...", icon="🔄")
+            time.sleep(0.3)
             st.rerun()
     with sync_c3:
         if is_bot_running:
             if st.button("⏹️ Stop Engine", key="stop_engine_top_btn", type="secondary", use_container_width=True):
                 kill_autonomous_bot()
-                st.warning("Autonomous engine stopped.")
-                time.sleep(1)
+                st.toast("⏹️ Autonomous Engine Stopped.", icon="🛑")
+                time.sleep(0.5)
                 st.rerun()
         else:
             if st.button("▶️ Launch Engine", key="launch_engine_top_btn", type="primary", use_container_width=True):
-                launch_autonomous_bot()
-                st.success("24/7 Autonomous engine launched!")
-                time.sleep(1)
+                new_pid = launch_autonomous_bot()
+                st.toast(f"▶️ Autonomous Engine Active (PID {new_pid})!", icon="🟢")
+                time.sleep(0.5)
                 st.rerun()
 
     # ── Quick Market Hop (2 rows x 3 columns) ──
