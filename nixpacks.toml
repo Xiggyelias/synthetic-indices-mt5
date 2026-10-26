@@ -1,6 +1,20 @@
 # ==============================================================================
-# Nixpacks Configuration for Dokploy, Railway, Coolify & Cloud Platforms
+# Nixpacks Configuration for Dokploy / Cloud Hosting
 # ==============================================================================
 
+[phases.setup]
+nixPkgs = ["python312", "gcc"]
+
+[phases.install]
+cmds = [
+    "python3 -m venv /opt/venv",
+    "/opt/venv/bin/pip install --no-cache-dir --upgrade pip",
+    "/opt/venv/bin/pip install --no-cache-dir -r requirements.txt"
+]
+
 [start]
-cmd = "streamlit run dashboard.py --server.port ${PORT:-8501} --server.address 0.0.0.0 --server.headless true --browser.gatherUsageStats false"
+cmd = "/opt/venv/bin/streamlit run dashboard.py --server.port ${PORT:-8501} --server.address 0.0.0.0 --server.headless true --browser.gatherUsageStats false"
+
+[variables]
+PATH = "/opt/venv/bin:$PATH"
+PYTHONPATH = "/app/src"
