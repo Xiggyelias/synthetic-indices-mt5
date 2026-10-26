@@ -107,11 +107,13 @@ class SyntheticStrategy:
         risk_manager: Optional[SyntheticRiskManager] = None,
         min_math_edge_score: float = 65.0,
         kalman_confirm_threshold: float = 0.8,
+        kalman_veto_contradictions: bool = True,
     ):
         self.brain = brain or CalculativeBrain()
         self.risk_manager = risk_manager or SyntheticRiskManager()
         self.min_math_edge_score = min_math_edge_score
         self.kalman_confirm_threshold = kalman_confirm_threshold
+        self.kalman_veto_contradictions = kalman_veto_contradictions
         self.last_rejection = ""  # Why the most recent edge-passing signal could not be sized
 
     def evaluate(
@@ -153,6 +155,10 @@ class SyntheticStrategy:
         cost_r = float(analysis.metadata.get("cost_r", 0.0))
 
         kalman = kalman_alignment(analysis.kalman_zscore, direction, self.kalman_confirm_threshold)
+        if self.kalman_veto_contradictions and kalman == "CONTRADICTS":
+            self.last_rejection = f"Kalman state-space filter contradicts {direction} (Z={analysis.kalman_zscore:+.2f})"
+            return None
+
         var_level, var_scale = var_risk_level(analysis.var_95_pct)
 
         sizing = self.risk_manager.calculate_position_size(
