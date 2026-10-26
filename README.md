@@ -107,6 +107,23 @@ pip install -r requirements-bot.txt
 
 ---
 
+## 🌐 24/7 Production Deployment (VPS / Cloud)
+
+For a complete step-by-step VPS hosting runbook and automated verification:
+
+1. **Deployment Runbook:** Read [`deploy/DEPLOY_CHECKLIST.md`](file:///c:/Users/emmanuel/Desktop/files%20(1)/deploy/DEPLOY_CHECKLIST.md)
+2. **Pre-Flight System Check:**
+   ```bash
+   python deploy/verify_deployment.py
+   ```
+3. **24/7 Auto-Restart Supervisor:**
+   ```cmd
+   deploy\start_production_bot.bat
+   ```
+4. **Auto-Start on Boot:** Run `powershell .\deploy\install_windows_task.ps1` as Administrator.
+
+---
+
 ## 🚀 Running QUANTA-SYNTH (MetaTrader 5)
 
 ### Command Line Interface
