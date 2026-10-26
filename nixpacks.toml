@@ -1,12 +1,6 @@
 # ==============================================================================
-# Nixpacks Configuration for Cloud Hosting (Railway, Render, Coolify, etc.)
+# Nixpacks Configuration for Dokploy, Railway, Coolify & Cloud Platforms
 # ==============================================================================
-
-[phases.setup]
-nixPkgs = ["python3", "gcc"]
-
-[phases.install]
-cmds = ["pip install -r requirements.txt"]
 
 [start]
 cmd = "streamlit run dashboard.py --server.port ${PORT:-8501} --server.address 0.0.0.0 --server.headless true --browser.gatherUsageStats false"

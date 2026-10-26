@@ -1,25 +1,32 @@
+# ==============================================================================
+# Docker Compose: QUANTA-SYNTH Stack (Dokploy / Coolify / Local Docker)
+# ==============================================================================
+
 version: "3.9"
 
 services:
-  quanta-synth-frontend:
+  quanta-synth:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: quanta-synth-frontend
+    container_name: quanta-synth
     restart: unless-stopped
     ports:
-      - "8501:8501"
+      - "${PORT:-8501}:8501"
     environment:
       - PYTHONUNBUFFERED=1
       - PYTHONPATH=/app/src
+      - PORT=8501
+    env_file:
+      - .env
     volumes:
-      # Persist trading state, configurations, and logs on the VPS host
+      # Persist state, logs, and configurations across redeployments
       - ./data:/app/data
       - ./logs:/app/logs
       - ./config:/app/config
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8501/_stcore/health"]
+      test: ["CMD-SHELL", "curl -f http://localhost:8501/_stcore/health || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 15s
+      start_period: 20s

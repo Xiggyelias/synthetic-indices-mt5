@@ -1,6 +1,6 @@
 # ==============================================================================
 # Dockerfile: QUANTA-SYNTH Institutional Frontend (Streamlit)
-# Lightweight, hardened Linux container for VPS deployment
+# Hardened Linux container optimized for Dokploy, Coolify, VPS, and Docker hosts
 # ==============================================================================
 
 FROM python:3.12-slim
@@ -30,16 +30,12 @@ COPY . /app
 # Create data and log directories with proper permissions
 RUN mkdir -p /app/data /app/logs /app/config
 
-# Expose Streamlit default port
+# Expose default Streamlit port
 EXPOSE 8501
 
-# Container healthcheck
-HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
-    CMD curl -f http://localhost:8501/_stcore/health || exit 1
+# Dynamic container healthcheck
+HEALTHCHECK --interval=30s --timeout=10s --start-period=15s --retries=3 \
+    CMD curl -f http://localhost:${PORT:-8501}/_stcore/health || exit 1
 
-# Launch the QUANTA-SYNTH Institutional Dashboard
-CMD ["streamlit", "run", "dashboard_synthetic.py", \
-     "--server.port=8501", \
-     "--server.address=0.0.0.0", \
-     "--server.headless=true", \
-     "--browser.gatherUsageStats=false"]
+# Launch with dynamic port binding for Dokploy / Cloud reverse proxies
+CMD ["sh", "-c", "streamlit run dashboard.py --server.port=${PORT:-8501} --server.address=0.0.0.0 --server.headless=true --browser.gatherUsageStats=false"]
