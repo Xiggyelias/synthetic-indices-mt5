@@ -1497,15 +1497,22 @@ with tabs[4]:
     # ── Interactive Verification Trade Execution Box ──
     with st.expander("🧪 Open Live Market Verification Trade (Instant Execution)", expanded=True):
         st.caption("Place an immediate order at live Deriv spot price to test order routing, real-time SL/TP tracking, and floating P&L calculations.")
+        clean_symbols = [
+            "Volatility 75 Index", "Volatility 75 (1s) Index", "Volatility 100 Index", 
+            "Volatility 100 (1s) Index", "Volatility 50 Index", "Volatility 50 (1s) Index",
+            "Volatility 25 Index", "Volatility 10 Index", "Crash 1000 Index", "Crash 500 Index",
+            "Crash 300 Index", "Boom 1000 Index", "Boom 500 Index", "Boom 300 Index", "Step Index"
+        ]
         tc1, tc2, tc3, tc4 = st.columns([2, 1, 1, 2])
         with tc1:
-            exec_symbol = st.selectbox("Instrument", list(DERIV_SYNTHETIC_SPECS.keys()), index=0, key="exec_sym_box")
+            exec_symbol = st.selectbox("Instrument", clean_symbols, index=0, key="exec_sym_box")
         with tc2:
             exec_dir = st.selectbox("Direction", ["BUY", "SELL"], index=0, key="exec_dir_box")
         with tc3:
-            spec = DERIV_SYNTHETIC_SPECS.get(exec_symbol, {"min_lot": 0.01})
+            spec = DERIV_SYNTHETIC_SPECS.get(exec_symbol.upper(), DERIV_SYNTHETIC_SPECS.get(exec_symbol, {"min_lot": 0.01}))
             min_l = float(spec.get("min_lot", 0.01))
-            exec_vol = st.number_input("Volume", min_value=min_l, max_value=50.0, value=min_l, step=min_l, key="exec_vol_box")
+            fmt = "%.3f" if min_l < 0.01 else "%.2f"
+            exec_vol = st.number_input("Volume", min_value=min_l, max_value=50.0, value=min_l, step=min_l, format=fmt, key="exec_vol_box")
         with tc4:
             st.write("")
             st.write("")
@@ -1557,6 +1564,36 @@ with tabs[4]:
     if state_file.exists():
         try:
             cur_data = json.loads(state_file.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    
+    # Auto-seed verification trade if file does not exist or open_trades is empty
+    if not cur_data.get("open_trades") and not cur_data.get("closed_trades"):
+        try:
+            v75_df = get_deriv_live_candles("Volatility 75 Index", "M1", 5)
+            if v75_df is not None and len(v75_df) > 0:
+                seed_p = float(v75_df["close"].iloc[-1])
+                r_seed = seed_p * 0.008
+                cur_data.setdefault("open_trades", {})["VERIFY-7501"] = {
+                    "ticket": "VERIFY-7501",
+                    "symbol": "Volatility 75 Index",
+                    "direction": "BUY",
+                    "volume": 0.005,
+                    "entry_price": seed_p,
+                    "stop_loss": round(seed_p - r_seed, 4),
+                    "take_profit": round(seed_p + 1.5 * r_seed, 4),
+                    "strategy_type": "LIVE_VERIFICATION_TEST",
+                    "math_edge_score": 85.0,
+                    "win_probability": 0.72,
+                    "kalman_confirmation": "CONFIRMS",
+                    "var_risk_level": "LOW",
+                    "opened_at": datetime.now(timezone.utc).isoformat(),
+                    "moved_to_be": False,
+                    "tp1_reached": False,
+                }
+                cur_data["updated_at"] = datetime.now(timezone.utc).isoformat()
+                state_file.parent.mkdir(parents=True, exist_ok=True)
+                state_file.write_text(json.dumps(cur_data, indent=2), encoding="utf-8")
         except Exception:
             pass
 
