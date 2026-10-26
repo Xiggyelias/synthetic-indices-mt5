@@ -62,30 +62,40 @@ def setup_logger(verbose: bool = False) -> logging.Logger:
 
 
 def load_config() -> SyntheticBotConfig:
-    """Read config/config_synthetic.json. A broken file is an error, not a silent fallback."""
+    """Read config/config_synthetic.json with priority overrides from environment variables."""
     cfg_path = ROOT / "config" / "config_synthetic.json"
-    if not cfg_path.exists():
-        return SyntheticBotConfig()
+    data = {}
+    if cfg_path.exists():
+        try:
+            data = json.loads(cfg_path.read_text(encoding="utf-8"))
+        except Exception:
+            data = {}
 
-    data = json.loads(cfg_path.read_text(encoding="utf-8"))
     rm = data.get("risk_management", {})
     hold = data.get("trade_holding", {})
     defaults = SyntheticBotConfig()
+
+    env_syms = os.getenv("SYMBOLS")
+    if env_syms:
+        active_symbols = [s.strip() for s in env_syms.split(",") if s.strip()]
+    else:
+        active_symbols = data.get("active_symbols", defaults.symbols)
+
     return SyntheticBotConfig(
-        symbols=data.get("active_symbols", defaults.symbols),
-        timeframe=data.get("timeframe", defaults.timeframe),
+        symbols=active_symbols,
+        timeframe=os.getenv("TIMEFRAME", data.get("timeframe", defaults.timeframe)),
         lookback_bars=int(data.get("lookback_bars", defaults.lookback_bars)),
-        poll_seconds=int(data.get("poll_seconds", defaults.poll_seconds)),
+        poll_seconds=int(os.getenv("POLL_SECONDS", data.get("poll_seconds", defaults.poll_seconds))),
         fast_poll_seconds=int(data.get("fast_poll_seconds", defaults.fast_poll_seconds)),
         slow_poll_seconds=int(data.get("slow_poll_seconds", defaults.slow_poll_seconds)),
-        magic=int(data.get("magic_number", defaults.magic)),
-        min_math_edge=float(data.get("min_math_edge", defaults.min_math_edge)),
-        max_risk_pct=float(rm.get("max_risk_per_trade", defaults.max_risk_pct)),
-        kelly_fraction=float(rm.get("fractional_kelly_multiplier", defaults.kelly_fraction)),
+        magic=int(os.getenv("BOT_MAGIC", data.get("magic_number", defaults.magic))),
+        min_math_edge=float(os.getenv("MIN_MATH_EDGE", data.get("min_math_edge", 60.0))),
+        max_risk_pct=float(os.getenv("MAX_RISK_PER_TRADE", rm.get("max_risk_per_trade", defaults.max_risk_pct))),
+        kelly_fraction=float(os.getenv("FRACTIONAL_KELLY", rm.get("fractional_kelly_multiplier", defaults.kelly_fraction))),
         max_drawdown_limit=float(rm.get("max_drawdown_limit", defaults.max_drawdown_limit)),
-        max_open_trades=int(rm.get("max_open_trades", defaults.max_open_trades)),
+        max_open_trades=int(os.getenv("MAX_OPEN_TRADES", rm.get("max_open_trades", defaults.max_open_trades))),
         be_trigger_r=float(rm.get("be_trigger_r", defaults.be_trigger_r)),
-        aggressive_mode=bool(rm.get("aggressive_mode", defaults.aggressive_mode)),
+        aggressive_mode=os.getenv("AGGRESSIVE_MODE", str(rm.get("aggressive_mode", defaults.aggressive_mode))).lower() in ("true", "1", "yes"),
         var_emergency_threshold=float(rm.get("var_emergency_threshold", defaults.var_emergency_threshold)),
         kalman_trail_enable=bool(rm.get("kalman_trail_enable", defaults.kalman_trail_enable)),
         spike_harvest_r=float(rm.get("spike_harvest_r", defaults.spike_harvest_r)),
