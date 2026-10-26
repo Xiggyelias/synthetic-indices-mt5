@@ -657,25 +657,36 @@ st.markdown(f"""
 # ── Sidebar Controls ──────────────────────────────────────────────────────────
 
 st.sidebar.markdown("### 🔬 Market Surveillance")
+SURVEILLANCE_SYMBOLS = [
+    "Volatility 75 Index",
+    "Volatility 75 (1s) Index",
+    "Volatility 100 Index",
+    "Volatility 100 (1s) Index",
+    "Volatility 50 Index",
+    "Volatility 25 Index",
+    "Volatility 10 Index",
+    "Crash 1000 Index",
+    "Crash 500 Index",
+    "Crash 300 Index",
+    "Boom 1000 Index",
+    "Boom 500 Index",
+    "Boom 300 Index",
+    "Step Index",
+]
+
+if "selected_symbol" not in st.session_state:
+    st.session_state["selected_symbol"] = SURVEILLANCE_SYMBOLS[0]
+
+cur_sym_val = st.session_state["selected_symbol"]
+sym_idx_val = SURVEILLANCE_SYMBOLS.index(cur_sym_val) if cur_sym_val in SURVEILLANCE_SYMBOLS else 0
+
 selected_symbol = st.sidebar.selectbox(
     "Synthetic Instrument",
-    [
-        "Volatility 75 Index",
-        "Volatility 75 (1s) Index",
-        "Volatility 100 Index",
-        "Volatility 100 (1s) Index",
-        "Volatility 50 Index",
-        "Volatility 25 Index",
-        "Volatility 10 Index",
-        "Crash 1000 Index",
-        "Crash 500 Index",
-        "Crash 300 Index",
-        "Boom 1000 Index",
-        "Boom 500 Index",
-        "Boom 300 Index",
-        "Step Index",
-    ]
+    SURVEILLANCE_SYMBOLS,
+    index=sym_idx_val,
+    key="sidebar_symbol_picker",
 )
+st.session_state["selected_symbol"] = selected_symbol
 selected_tf = st.sidebar.selectbox("Timeframe Resolution", ["M1", "M5", "M15", "H1"], index=1)
 sample_size = st.sidebar.slider("Lookback Depth (Candles)", min_value=60, max_value=500, value=150, step=10)
 
@@ -749,7 +760,7 @@ if btn_col2.button("⏹️ Kill", disabled=not is_bot_running):
     st.rerun()
 
 st.sidebar.markdown("---")
-auto_refresh = st.sidebar.selectbox("Auto-Refresh Interval", ["Off", "5 seconds", "10 seconds", "30 seconds"], index=0)
+auto_refresh = st.sidebar.selectbox("Auto-Refresh Interval", ["5 seconds (Real-Time)", "10 seconds", "30 seconds", "Off"], index=0)
 
 
 # ── Fetch or Generate Market Data ─────────────────────────────────────────────
@@ -819,97 +830,26 @@ with tabs[0]:
         feed_badge = "🟢 24/7 CLOUD QUANT ENGINE"
     else:
         feed_badge = "⚡ QUANT MATRIX STREAM"
+
+    # ── Quick Market Switcher Pills ──
+    quick_markets = [
+        ("Volatility 75", "Volatility 75 Index"),
+        ("Crash 1000", "Crash 1000 Index"),
+        ("Boom 1000", "Boom 1000 Index"),
+        ("Step Index", "Step Index"),
+        ("Volatility 100", "Volatility 100 Index"),
+        ("Volatility 50", "Volatility 50 Index"),
+    ]
+    st.markdown('<div style="font-size:11px; text-transform:uppercase; letter-spacing:1px; color:#7d8590; margin-bottom:6px; font-weight:700;">⚡ Quick Market Switcher</div>', unsafe_allow_html=True)
+    q_cols = st.columns(6)
+    for q_idx, (q_label, q_sym) in enumerate(quick_markets):
+        is_cur = (selected_symbol == q_sym)
+        if q_cols[q_idx].button(f"{'📍 ' if is_cur else ''}{q_label}", key=f"qmarket_{q_idx}", type="primary" if is_cur else "secondary"):
+            st.session_state["selected_symbol"] = q_sym
+            st.session_state["sidebar_symbol_picker"] = q_sym
+            st.rerun()
+
     st.caption(f"**{selected_symbol}** · {selected_tf} Resolution · {feed_badge} · {len(market_df)} Live Bars · Synced: {datetime.now(timezone.utc).strftime('%H:%M:%S UTC')}")
-
-    # ── Row 1: Primary Quantitative Metrics (4 cards) ──
-    c1, c2, c3, c4 = st.columns(4)
-    with c1:
-        h_color = "#3fb950" if analysis.hurst.regime == "PERSISTENT" else ("#58a6ff" if analysis.hurst.regime == "ANTI_PERSISTENT" else "#7d8590")
-        h_icon = "📈" if analysis.hurst.regime == "PERSISTENT" else ("🔄" if analysis.hurst.regime == "ANTI_PERSISTENT" else "🎲")
-        st.markdown(f"""
-        <div class="quant-card">
-          <div class="card-label">Fractal Hurst Exponent (H)</div>
-          <div class="card-value" style="color:{h_color}">{h_icon} {analysis.hurst.hurst_exponent:.4f}</div>
-          <div class="card-sub">{analysis.hurst.regime} · R²={analysis.hurst.r_squared:.3f}</div>
-        </div>
-        """, unsafe_allow_html=True)
-
-    with c2:
-        ou_color = "#f85149" if abs(analysis.ou.current_zscore) >= 2.0 else ("#e3b341" if abs(analysis.ou.current_zscore) >= 1.5 else "#58a6ff")
-        fpt_text = f"FPT: {analysis.ou.expected_fpt_bars:.0f}b" if getattr(analysis.ou, 'expected_fpt_bars', 0) > 0 else f"τ½: {analysis.ou.half_life:.1f}b"
-        st.markdown(f"""
-        <div class="quant-card">
-          <div class="card-label">O-U Mean Reversion Z-Score</div>
-          <div class="card-value" style="color:{ou_color}">{analysis.ou.current_zscore:+.3f}σ</div>
-          <div class="card-sub">{fpt_text} · p={getattr(analysis.ou, 'stationary_p_value', 0.5):.4f}</div>
-        </div>
-        """, unsafe_allow_html=True)
-
-    with c3:
-        st.markdown(f"""
-        <div class="quant-card">
-          <div class="card-label">Garman-Klass Volatility</div>
-          <div class="card-value">{analysis.garman_klass_vol:.6f}</div>
-          <div class="card-sub">7.4× Statistical Efficiency</div>
-        </div>
-        """, unsafe_allow_html=True)
-
-    with c4:
-        ent_color = "#3fb950" if analysis.entropy.is_ordered else "#f85149"
-        ent_icon = "✅" if analysis.entropy.is_ordered else "❌"
-        st.markdown(f"""
-        <div class="quant-card">
-          <div class="card-label">Shannon Information Entropy</div>
-          <div class="card-value" style="color:{ent_color}">{ent_icon} {analysis.entropy.normalized_entropy:.4f}</div>
-          <div class="card-sub">{'ORDERED · Predictable Flow' if analysis.entropy.is_ordered else 'DISORDERED · Random Drift'}</div>
-        </div>
-        """, unsafe_allow_html=True)
-
-    # ── Row 2: Advanced Quantitative (Kalman, VaR, CVaR, Sharpe) ──
-    k1, k2, k3, k4 = st.columns(4)
-    with k1:
-        kalman_dev = ((curr_price - analysis.kalman_fair_value) / curr_price * 100) if curr_price > 0 else 0
-        kdev_color = "#f85149" if abs(kalman_dev) > 0.3 else "#3fb950"
-        st.markdown(f"""
-        <div class="quant-card">
-          <div class="card-label">Kalman Fair Value</div>
-          <div class="card-value" style="font-size:20px;">{analysis.kalman_fair_value:.5f}</div>
-          <div class="card-sub" style="color:{kdev_color}">Deviation: {kalman_dev:+.3f}% · Z={analysis.kalman_zscore:+.2f}σ</div>
-        </div>
-        """, unsafe_allow_html=True)
-
-    with k2:
-        var_color = "#f85149" if analysis.var_95_pct > 3.0 else ("#e3b341" if analysis.var_95_pct > 1.5 else "#3fb950")
-        gauge_pct = min(analysis.var_95_pct / 5.0 * 100, 100)
-        risk_cls = "risk-high" if analysis.var_95_pct > 3.0 else ("risk-medium" if analysis.var_95_pct > 1.5 else "risk-low")
-        st.markdown(f"""
-        <div class="quant-card">
-          <div class="card-label">Value at Risk (95% · 5bar)</div>
-          <div class="card-value" style="color:{var_color}; font-size:20px;">{analysis.var_95_pct:.3f}%</div>
-          <div class="risk-gauge {risk_cls}"><div class="risk-gauge-fill" style="width:{gauge_pct:.0f}%"></div></div>
-        </div>
-        """, unsafe_allow_html=True)
-
-    with k3:
-        cvar_color = "#f85149" if analysis.cvar_95_pct > 4.0 else ("#e3b341" if analysis.cvar_95_pct > 2.0 else "#3fb950")
-        st.markdown(f"""
-        <div class="quant-card">
-          <div class="card-label">CVaR / Expected Shortfall</div>
-          <div class="card-value" style="color:{cvar_color}; font-size:20px;">{analysis.cvar_95_pct:.3f}%</div>
-          <div class="card-sub">Tail Risk Beyond VaR Threshold</div>
-        </div>
-        """, unsafe_allow_html=True)
-
-    with k4:
-        sharpe_val = analysis.instantaneous_sharpe
-        sharpe_color = "#3fb950" if sharpe_val > 1.5 else ("#e3b341" if sharpe_val > 0.5 else "#f85149")
-        st.markdown(f"""
-        <div class="quant-card">
-          <div class="card-label">Instantaneous Sharpe Ratio</div>
-          <div class="card-value" style="color:{sharpe_color}; font-size:20px;">{sharpe_val:+.3f}</div>
-          <div class="card-sub">{'STRONG' if sharpe_val > 1.5 else ('MODERATE' if sharpe_val > 0.5 else 'WEAK')} Risk-Adjusted Return</div>
-        </div>
-        """, unsafe_allow_html=True)
 
     # ── Confluence & Action Verdict Banner ──
     is_snipe = "SNIPE" in analysis.recommended_action
@@ -1055,6 +995,100 @@ with tabs[0]:
     fig.update_yaxes(gridcolor="rgba(48, 54, 61, 0.3)", showgrid=True)
     st.plotly_chart(fig, key="main_chart")
 
+
+    # ── Quantitative Decomposition Metric Cards (8 Cards) ──
+    st.markdown('<div class="section-divider"></div>', unsafe_allow_html=True)
+    st.markdown("#### 🧠 Stochastic Calculus & Kalman Decomposition")
+    # ── Row 1: Primary Quantitative Metrics (4 cards) ──
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        h_color = "#3fb950" if analysis.hurst.regime == "PERSISTENT" else ("#58a6ff" if analysis.hurst.regime == "ANTI_PERSISTENT" else "#7d8590")
+        h_icon = "📈" if analysis.hurst.regime == "PERSISTENT" else ("🔄" if analysis.hurst.regime == "ANTI_PERSISTENT" else "🎲")
+        st.markdown(f"""
+        <div class="quant-card">
+          <div class="card-label">Fractal Hurst Exponent (H)</div>
+          <div class="card-value" style="color:{h_color}">{h_icon} {analysis.hurst.hurst_exponent:.4f}</div>
+          <div class="card-sub">{analysis.hurst.regime} · R²={analysis.hurst.r_squared:.3f}</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    with c2:
+        ou_color = "#f85149" if abs(analysis.ou.current_zscore) >= 2.0 else ("#e3b341" if abs(analysis.ou.current_zscore) >= 1.5 else "#58a6ff")
+        fpt_text = f"FPT: {analysis.ou.expected_fpt_bars:.0f}b" if getattr(analysis.ou, 'expected_fpt_bars', 0) > 0 else f"τ½: {analysis.ou.half_life:.1f}b"
+        st.markdown(f"""
+        <div class="quant-card">
+          <div class="card-label">O-U Mean Reversion Z-Score</div>
+          <div class="card-value" style="color:{ou_color}">{analysis.ou.current_zscore:+.3f}σ</div>
+          <div class="card-sub">{fpt_text} · p={getattr(analysis.ou, 'stationary_p_value', 0.5):.4f}</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    with c3:
+        st.markdown(f"""
+        <div class="quant-card">
+          <div class="card-label">Garman-Klass Volatility</div>
+          <div class="card-value">{analysis.garman_klass_vol:.6f}</div>
+          <div class="card-sub">7.4× Statistical Efficiency</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    with c4:
+        ent_color = "#3fb950" if analysis.entropy.is_ordered else "#f85149"
+        ent_icon = "✅" if analysis.entropy.is_ordered else "❌"
+        st.markdown(f"""
+        <div class="quant-card">
+          <div class="card-label">Shannon Information Entropy</div>
+          <div class="card-value" style="color:{ent_color}">{ent_icon} {analysis.entropy.normalized_entropy:.4f}</div>
+          <div class="card-sub">{'ORDERED · Predictable Flow' if analysis.entropy.is_ordered else 'DISORDERED · Random Drift'}</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    # ── Row 2: Advanced Quantitative (Kalman, VaR, CVaR, Sharpe) ──
+    k1, k2, k3, k4 = st.columns(4)
+    with k1:
+        kalman_dev = ((curr_price - analysis.kalman_fair_value) / curr_price * 100) if curr_price > 0 else 0
+        kdev_color = "#f85149" if abs(kalman_dev) > 0.3 else "#3fb950"
+        st.markdown(f"""
+        <div class="quant-card">
+          <div class="card-label">Kalman Fair Value</div>
+          <div class="card-value" style="font-size:20px;">{analysis.kalman_fair_value:.5f}</div>
+          <div class="card-sub" style="color:{kdev_color}">Deviation: {kalman_dev:+.3f}% · Z={analysis.kalman_zscore:+.2f}σ</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    with k2:
+        var_color = "#f85149" if analysis.var_95_pct > 3.0 else ("#e3b341" if analysis.var_95_pct > 1.5 else "#3fb950")
+        gauge_pct = min(analysis.var_95_pct / 5.0 * 100, 100)
+        risk_cls = "risk-high" if analysis.var_95_pct > 3.0 else ("risk-medium" if analysis.var_95_pct > 1.5 else "risk-low")
+        st.markdown(f"""
+        <div class="quant-card">
+          <div class="card-label">Value at Risk (95% · 5bar)</div>
+          <div class="card-value" style="color:{var_color}; font-size:20px;">{analysis.var_95_pct:.3f}%</div>
+          <div class="risk-gauge {risk_cls}"><div class="risk-gauge-fill" style="width:{gauge_pct:.0f}%"></div></div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    with k3:
+        cvar_color = "#f85149" if analysis.cvar_95_pct > 4.0 else ("#e3b341" if analysis.cvar_95_pct > 2.0 else "#3fb950")
+        st.markdown(f"""
+        <div class="quant-card">
+          <div class="card-label">CVaR / Expected Shortfall</div>
+          <div class="card-value" style="color:{cvar_color}; font-size:20px;">{analysis.cvar_95_pct:.3f}%</div>
+          <div class="card-sub">Tail Risk Beyond VaR Threshold</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    with k4:
+        sharpe_val = analysis.instantaneous_sharpe
+        sharpe_color = "#3fb950" if sharpe_val > 1.5 else ("#e3b341" if sharpe_val > 0.5 else "#f85149")
+        st.markdown(f"""
+        <div class="quant-card">
+          <div class="card-label">Instantaneous Sharpe Ratio</div>
+          <div class="card-value" style="color:{sharpe_color}; font-size:20px;">{sharpe_val:+.3f}</div>
+          <div class="card-sub">{'STRONG' if sharpe_val > 1.5 else ('MODERATE' if sharpe_val > 0.5 else 'WEAK')} Risk-Adjusted Return</div>
+        </div>
+        """, unsafe_allow_html=True)
+
     # ── Specialized Sub-Panels ──
     st.markdown('<div class="section-divider"></div>', unsafe_allow_html=True)
 
@@ -1084,7 +1118,7 @@ with tabs[1]:
 
     scan_all_btn = st.button("⚡ Execute 14-Market Matrix Scan", key="scan_all_mat", type="primary")
 
-    if scan_all_btn:
+    if scan_all_btn or "scan_matrix_cache" not in st.session_state:
         with st.spinner("Scanning all 14 synthetic markets with stochastic calculus..."):
             matrix_data = []
             all_syms = [
@@ -1402,7 +1436,7 @@ Maximizes asymptotic growth rate. Zero probability of ruin.
 
 # ── Auto-Refresh Logic ────────────────────────────────────────────────────────
 if auto_refresh != "Off":
-    sec_map = {"5 seconds": 5, "10 seconds": 10, "30 seconds": 30}
-    delay = sec_map.get(auto_refresh, 10)
+    sec_map = {"5 seconds (Real-Time)": 5, "5 seconds": 5, "10 seconds": 10, "30 seconds": 30}
+    delay = sec_map.get(auto_refresh, 5)
     time.sleep(delay)
     st.rerun()
