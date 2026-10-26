@@ -343,6 +343,90 @@ html, body, [class*="css"] {
 .stat-key { color: #7d8590; font-weight: 500; }
 .stat-val { color: #e6edf3; font-weight: 600; font-family: 'JetBrains Mono', monospace; }
 
+
+/* ── Unified Hero Command Bar ── */
+.hero-command-bar {
+    background: linear-gradient(135deg, #080c18 0%, #0d1629 50%, #0a1020 100%);
+    border: 1px solid rgba(56, 139, 253, 0.2);
+    border-radius: 12px;
+    padding: 16px 24px;
+    margin-bottom: 16px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 14px;
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4);
+    position: relative;
+    overflow: hidden;
+}
+.hero-command-bar::before {
+    content: '';
+    position: absolute;
+    top: 0; left: 0; right: 0; height: 2px;
+    background: linear-gradient(90deg, #388bfd, #00d4aa, #3fb950);
+}
+.cmd-bar-left {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+.cmd-bar-title {
+    font-size: 19px;
+    font-weight: 800;
+    color: #ffffff;
+    letter-spacing: -0.3px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+.cmd-bar-badge {
+    font-size: 10px;
+    font-weight: 700;
+    color: #00d4aa;
+    background: rgba(0, 212, 170, 0.1);
+    border: 1px solid rgba(0, 212, 170, 0.3);
+    padding: 2px 7px;
+    border-radius: 4px;
+    letter-spacing: 1px;
+}
+.cmd-bar-sub {
+    font-size: 12px;
+    color: #7d8590;
+    font-weight: 500;
+}
+.cmd-bar-center {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    flex-wrap: wrap;
+}
+.cmd-bar-right {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+.engine-badge {
+    padding: 6px 14px;
+    border-radius: 8px;
+    font-size: 12px;
+    font-weight: 700;
+    font-family: 'JetBrains Mono', monospace;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+.engine-active {
+    background: rgba(63, 185, 80, 0.12);
+    border: 1px solid rgba(63, 185, 80, 0.3);
+    color: #3fb950;
+}
+.engine-standby {
+    background: rgba(248, 81, 73, 0.12);
+    border: 1px solid rgba(248, 81, 73, 0.3);
+    color: #f85149;
+}
+
 /* ── Enhanced Log Terminal ── */
 .log-container {
     background: linear-gradient(180deg, #0a0d14, #080b12);
@@ -434,10 +518,40 @@ section[data-testid="stSidebar"] .stMarkdown h3 {
     margin-bottom: 8px;
 }
 
-/* ── Hide Streamlit Branding ── */
+/* ── Clean Streamlit Header & Branding ── */
 #MainMenu { visibility: hidden; }
 footer { visibility: hidden; }
-header { visibility: hidden; }
+header {
+    background: transparent !important;
+}
+[data-testid="stHeader"] {
+    background: transparent !important;
+}
+[data-testid="stToolbar"] {
+    display: none !important;
+}
+[data-testid="stDecoration"] {
+    display: none !important;
+}
+[data-testid="stStatusWidget"] {
+    display: none !important;
+}
+
+/* Ensure Sidebar toggle button is ALWAYS clearly visible and styled */
+[data-testid="collapsedControl"] {
+    display: flex !important;
+    visibility: visible !important;
+    z-index: 999999 !important;
+    color: #58a6ff !important;
+    background: rgba(13, 20, 36, 0.95) !important;
+    border: 1px solid rgba(56, 139, 253, 0.4) !important;
+    border-radius: 8px !important;
+    padding: 6px 10px !important;
+    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.5) !important;
+}
+[data-testid="stSidebarCollapseButton"] {
+    color: #58a6ff !important;
+}
 </style>
 """, unsafe_allow_html=True)
 
@@ -569,7 +683,7 @@ def archetype_badge(archetype: str) -> str:
     return f'<span class="archetype-badge {cls}">{label}</span>'
 
 
-# ── Top Telemetry & Control Banner ────────────────────────────────────────────
+# ── Top Telemetry & Unified Command Bar ───────────────────────────────────────
 
 is_bot_running, bot_pid = get_cached_bot_status()
 bot_proc = get_bot_process()
@@ -579,35 +693,20 @@ conn, acc_info = get_live_mt5_connection()
 is_mt5_connected = conn is not None and acc_info is not None
 
 pulse_html = '<span class="pulse-dot-green"></span>' if is_bot_running else '<span class="pulse-dot-red"></span>'
-bot_status_str = f"AUTONOMOUS ENGINE: ACTIVE (PID {bot_pid})" if is_bot_running else "AUTONOMOUS ENGINE: STANDBY"
+bot_status_str = f"ACTIVE (PID {bot_pid})" if is_bot_running else "STANDBY"
+engine_css_class = "engine-active" if is_bot_running else "engine-standby"
 
 if is_mt5_connected:
     if getattr(conn, "server", "") == "Deriv-WebSocket-Live" or "WebSocket" in str(getattr(acc_info, "server", "")):
-        mt5_badge = f"🟢 DERIV OFFICIAL CLOUD STREAM • Live Synchronized • Capital: ${acc_info.equity:,.2f}"
+        mt5_badge = f"🟢 DERIV CLOUD STREAM • Capital: ${acc_info.equity:,.2f}"
     else:
-        mt5_badge = f"🟢 MT5 TERMINAL LIVE: #{acc_info.login} • Capital: ${acc_info.equity:,.2f}"
+        mt5_badge = f"🟢 MT5 TERMINAL #{acc_info.login} • Capital: ${acc_info.equity:,.2f}"
 elif is_bot_running:
-    mt5_badge = "🟢 24/7 CLOUD AUTONOMOUS ENGINE ACTIVE"
+    mt5_badge = "🟢 24/7 CLOUD QUANT ENGINE ACTIVE"
 else:
-    mt5_badge = "⚡ 24/7 CLOUD QUANT ENGINE: Standby (Click ▶ Launch to Start)"
+    mt5_badge = "⚡ CLOUD QUANT ENGINE: Standby"
 
-st.markdown(f"""
-<div class="hero-banner">
-  <div>
-    <div class="hero-title">⚡ QUANTA-SYNTH ELITE TERMINAL</div>
-    <div class="hero-sub">{mt5_badge}</div>
-    <div class="hero-version">v5.0 — Stochastic Calculus • Kalman Filter • Zero ML</div>
-  </div>
-  <div style="text-align:right">
-    <div style="font-size:13px; font-weight:700; color:{'#3fb950' if is_bot_running else '#f85149'}; font-family:'JetBrains Mono',monospace;">
-      {pulse_html} {bot_status_str}
-    </div>
-    <div style="font-size:11px; color:#7d8590; margin-top:6px; font-weight:500;">14 Synthetic Instruments • 24/7 Autonomous • Half-Kelly Compounding</div>
-  </div>
-</div>
-""", unsafe_allow_html=True)
-
-# ── Dynamic 24/7 Surveillance Radar Card ──────────────────────────────────────
+# Read state file for telemetry
 engine_state = {}
 state_file = ROOT / "data" / "synthetic_state.json"
 if state_file.exists():
@@ -628,31 +727,27 @@ else:
     time_str = datetime.now(timezone.utc).strftime("%H:%M:%S UTC")
 
 open_pos_count = len(engine_state.get("open_trades", {}))
-radar_status_text = "24/7 AUTONOMOUS MARKET RADAR ACTIVE" if is_bot_running else "24/7 MARKET RADAR: STANDBY"
-radar_sub_text = "Continuously scanning all 14 synthetic markets every 10s • Real-time Stream" if is_bot_running else "Click ▶ Launch in sidebar to start 24/7 autonomous surveillance"
-radar_dot_class = "radar-live-dot" if is_bot_running else "radar-idle-dot"
 
-st.markdown(f"""
-<div class="radar-card">
-  <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:10px;">
-    <div style="display:flex; align-items:center; gap:10px;">
-      <span class="{radar_dot_class}"></span>
-      <div>
-        <div style="font-size:13px; font-weight:800; color:#e6edf3; letter-spacing:0.5px;">{radar_status_text}</div>
-        <div style="font-size:11px; color:#7d8590; margin-top:2px;">{radar_sub_text}</div>
-      </div>
-    </div>
-    <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
-      <span class="radar-pill">⚡ <b>Scan Cycle:</b> #{cycle_num}</span>
-      <span class="radar-pill">📡 <b>Coverage:</b> 14 Markets</span>
-      <span class="radar-pill">🛡️ <b>Shield:</b> Guarding Capital</span>
-      <span class="radar-pill">📊 <b>Active Trades:</b> {open_pos_count}</span>
-      <span class="radar-pill">⏱️ <b>Heartbeat:</b> {time_str}</span>
+st.markdown(f'''
+<div class="hero-command-bar">
+  <div class="cmd-bar-left">
+    <div class="cmd-bar-title">⚡ QUANTA-SYNTH <span class="cmd-bar-badge">v5.0 ELITE</span></div>
+    <div class="cmd-bar-sub">{mt5_badge}</div>
+  </div>
+  <div class="cmd-bar-center">
+    <div class="radar-pill">⚡ <b>Scan Cycle:</b> #{cycle_num}</div>
+    <div class="radar-pill">📡 <b>Coverage:</b> 14 Markets</div>
+    <div class="radar-pill">🛡️ <b>Shield:</b> Guarding Capital</div>
+    <div class="radar-pill">📊 <b>Trades:</b> {open_pos_count}</div>
+    <div class="radar-pill">⏱️ <b>UTC:</b> {time_str}</div>
+  </div>
+  <div class="cmd-bar-right">
+    <div class="engine-badge {engine_css_class}">
+      {pulse_html} ENGINE {bot_status_str}
     </div>
   </div>
 </div>
-""", unsafe_allow_html=True)
-
+''', unsafe_allow_html=True)
 
 # ── Sidebar Controls ──────────────────────────────────────────────────────────
 
@@ -684,9 +779,9 @@ selected_symbol = st.sidebar.selectbox(
     "Synthetic Instrument",
     SURVEILLANCE_SYMBOLS,
     index=sym_idx_val,
-    key="sidebar_symbol_picker",
 )
 st.session_state["selected_symbol"] = selected_symbol
+
 selected_tf = st.sidebar.selectbox("Timeframe Resolution", ["M1", "M5", "M15", "H1"], index=1)
 sample_size = st.sidebar.slider("Lookback Depth (Candles)", min_value=60, max_value=500, value=150, step=10)
 
@@ -696,7 +791,7 @@ data_feed_source = st.sidebar.radio(
     index=0
 )
 
-if st.sidebar.button("🔄 Re-Sync Live Feed", help="Synchronize live real-time market connection"):
+if st.sidebar.button("🔄 Re-Sync Live Feed", help="Synchronize live real-time market connection", use_container_width=True):
     st.session_state.pop("mt5_conn_cached", None)
     get_live_mt5_connection(force_probe=True)
     st.sidebar.success("Live market feed synchronized!")
@@ -707,7 +802,7 @@ st.sidebar.markdown("---")
 st.sidebar.markdown("### ⚙️ Autonomous Engine")
 
 btn_col1, btn_col2 = st.sidebar.columns(2)
-if btn_col1.button("▶️ Launch", disabled=is_bot_running):
+if btn_col1.button("▶️ Launch", disabled=is_bot_running, use_container_width=True):
     log_dir = ROOT / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
     log_file = log_dir / "synthetic_bot.log"
@@ -729,7 +824,7 @@ if btn_col1.button("▶️ Launch", disabled=is_bot_running):
     time.sleep(1)
     st.rerun()
 
-if btn_col2.button("⏹️ Kill", disabled=not is_bot_running):
+if btn_col2.button("⏹️ Kill", disabled=not is_bot_running, use_container_width=True):
     pid_file = ROOT / "data" / "synthetic_bot.pid"
     killed = False
     if pid_file.exists():
@@ -760,8 +855,7 @@ if btn_col2.button("⏹️ Kill", disabled=not is_bot_running):
     st.rerun()
 
 st.sidebar.markdown("---")
-auto_refresh = st.sidebar.selectbox("Auto-Refresh Interval", ["5 seconds (Real-Time)", "10 seconds", "30 seconds", "Off"], index=0)
-
+auto_refresh = st.sidebar.selectbox("Auto-Refresh Interval", ["Off", "10 seconds", "30 seconds", "60 seconds"], index=0)
 
 # ── Fetch or Generate Market Data ─────────────────────────────────────────────
 
@@ -831,27 +925,39 @@ with tabs[0]:
     else:
         feed_badge = "⚡ QUANT MATRIX STREAM"
 
-    # ── Quick Market Switcher Pills ──
+    # ── Top Bar: Quick Sync & Market Info ──
+    sync_c1, sync_c2 = st.columns([1, 4])
+    with sync_c1:
+        if st.button("🔄 Sync Live Stream", key="sync_now_btn", type="primary", use_container_width=True):
+            st.rerun()
+    with sync_c2:
+        st.caption(f"**{selected_symbol}** · {selected_tf} Resolution · {feed_badge} · {len(market_df)} Live Bars · Synced: {datetime.now(timezone.utc).strftime('%H:%M:%S UTC')}")
+
+    # ── Quick Market Hop (2 rows x 3 columns) ──
+    st.markdown('<div style="font-size:11px; text-transform:uppercase; letter-spacing:1px; color:#7d8590; margin-top:4px; margin-bottom:8px; font-weight:700;">⚡ Quick Market Hop</div>', unsafe_allow_html=True)
+    q_row1 = st.columns(3)
+    q_row2 = st.columns(3)
     quick_markets = [
-        ("Volatility 75", "Volatility 75 Index"),
-        ("Crash 1000", "Crash 1000 Index"),
-        ("Boom 1000", "Boom 1000 Index"),
-        ("Step Index", "Step Index"),
-        ("Volatility 100", "Volatility 100 Index"),
-        ("Volatility 50", "Volatility 50 Index"),
+        ("📈 Volatility 75", "Volatility 75 Index"),
+        ("💥 Crash 1000", "Crash 1000 Index"),
+        ("🚀 Boom 1000", "Boom 1000 Index"),
+        ("🎲 Step Index", "Step Index"),
+        ("⚡ Volatility 100", "Volatility 100 Index"),
+        ("🌊 Volatility 50", "Volatility 50 Index"),
     ]
-    st.markdown('<div style="font-size:11px; text-transform:uppercase; letter-spacing:1px; color:#7d8590; margin-bottom:6px; font-weight:700;">⚡ Quick Market Switcher</div>', unsafe_allow_html=True)
-    q_cols = st.columns(6)
-    for q_idx, (q_label, q_sym) in enumerate(quick_markets):
-        is_cur = (selected_symbol == q_sym)
-        if q_cols[q_idx].button(f"{'📍 ' if is_cur else ''}{q_label}", key=f"qmarket_{q_idx}", type="primary" if is_cur else "secondary"):
-            st.session_state["selected_symbol"] = q_sym
-            st.session_state["sidebar_symbol_picker"] = q_sym
+    for idx, (lbl, sym) in enumerate(quick_markets[:3]):
+        is_cur = (selected_symbol == sym)
+        if q_row1[idx].button(f"{'📍 ' if is_cur else ''}{lbl}", key=f"qmk1_{idx}", type="primary" if is_cur else "secondary", use_container_width=True):
+            st.session_state["selected_symbol"] = sym
             st.rerun()
 
-    st.caption(f"**{selected_symbol}** · {selected_tf} Resolution · {feed_badge} · {len(market_df)} Live Bars · Synced: {datetime.now(timezone.utc).strftime('%H:%M:%S UTC')}")
+    for idx, (lbl, sym) in enumerate(quick_markets[3:]):
+        is_cur = (selected_symbol == sym)
+        if q_row2[idx].button(f"{'📍 ' if is_cur else ''}{lbl}", key=f"qmk2_{idx}", type="primary" if is_cur else "secondary", use_container_width=True):
+            st.session_state["selected_symbol"] = sym
+            st.rerun()
 
-    # ── Confluence & Action Verdict Banner ──
+    # ── Executive Verdict & Capital Shield Card ──
     is_snipe = "SNIPE" in analysis.recommended_action
     verdict_class = "verdict-buy" if "BUY" in analysis.recommended_action else ("verdict-sell" if "SELL" in analysis.recommended_action else "verdict-stand")
     verdict_icon = "🟢" if "BUY" in analysis.recommended_action else ("🔴" if "SELL" in analysis.recommended_action else "⚪")
@@ -862,49 +968,51 @@ with tabs[0]:
     arch_html = archetype_badge(analysis.strategy_archetype)
 
     if analysis.recommended_action == "STAND_ASIDE":
-        verdict_details = f"""
-        <div style="font-size:13px; font-weight:700; color:#8b949e; font-family:'JetBrains Mono',monospace;">STATUS: CAPITAL GUARD ACTIVE</div>
-        <div style="font-size:11px; margin-top:4px; color:#7d8590;">Current Price: {curr_price:,.2f} · Waiting for Edge ≥ 60%</div>
-        """
-        verdict_sub = f"Market is currently in Brownian noise ({analysis.hurst.regime}, H={analysis.hurst.hurst_exponent:.3f}). The engine protects your balance by standing aside until true statistical asymmetry occurs."
+        status_title = "CAPITAL SHIELD ACTIVE · REFUSING NOISE"
+        verdict_desc = f'''
+        <b>Status:</b> Market is behaving as a Brownian random walk (Fractal Hurst <b>H = {analysis.hurst.hurst_exponent:.3f}</b>, R² = {analysis.hurst.r_squared:.2f}).
+        <br><b>Algorithmic Action:</b> The calculative brain <b>deliberately refuses to trade noise</b> to preserve your funds.
+        Surveillance is actively scanning all <b>14 synthetic markets</b> every 10s and will execute the instant statistical asymmetry reaches <b>Edge ≥ 60%</b>.
+        '''
+        verdict_details = f'''
+        <div style="font-size:13px; font-weight:700; color:#58a6ff; font-family:'JetBrains Mono',monospace;">MATH EDGE: {analysis.math_edge_score}/100</div>
+        <div style="font-size:11px; margin-top:4px; color:#7d8590;">Required: ≥ 60/100</div>
+        <div style="font-size:11px; margin-top:4px; color:#8b949e;">Price: {curr_price:,.2f}</div>
+        '''
     else:
-        verdict_details = f"""
-        <div style="font-size:13px; font-weight:700; font-family:'JetBrains Mono',monospace;">TP1: {analysis.target_price:.5f} &nbsp;|&nbsp; TP2: {analysis.target_price_2:.5f}</div>
-        <div style="font-size:11px; margin-top:4px; color:#7d8590;">SL: {analysis.invalidation_price:.5f} &nbsp;|&nbsp; Horizon: {analysis.half_life_horizon_bars}b</div>
-        """
-        verdict_sub = f"Win Prob: <b>{analysis.calculated_win_probability:.1%}</b> &nbsp;|&nbsp; E[R]: <b>{analysis.expected_yield_r:+.2f}R</b> &nbsp;|&nbsp; {macro_conf_text}"
+        status_title = f"{analysis.recommended_action} · STATISTICAL EDGE CONFIRMED"
+        verdict_desc = f'''
+        <b>Signal:</b> High-conviction entry identified on {selected_symbol}.
+        <br><b>Statistical Edge:</b> Win Probability: <b>{analysis.calculated_win_probability:.1%}</b> · Expected Yield: <b>{analysis.expected_yield_r:+.2f}R</b> · {macro_conf_text}
+        '''
+        verdict_details = f'''
+        <div style="font-size:13px; font-weight:700; font-family:'JetBrains Mono',monospace; color:#3fb950;">TP1: {analysis.target_price:.5f}</div>
+        <div style="font-size:11px; margin-top:4px; color:#f85149;">SL: {analysis.invalidation_price:.5f}</div>
+        <div style="font-size:11px; margin-top:4px; color:#7d8590;">Horizon: {analysis.half_life_horizon_bars}b</div>
+        '''
 
-    st.markdown(f"""
-    <div class="verdict-box {verdict_class}">
-      <div>
-        <div style="font-size:17px; font-weight:800; letter-spacing:-0.3px;">{verdict_icon} {analysis.recommended_action} &nbsp;·&nbsp; Edge: {analysis.math_edge_score}/100 &nbsp; {arch_html}</div>
-        <div style="font-size:12px; margin-top:6px; opacity:0.9;">{verdict_sub}</div>
+    st.markdown(f'''
+    <div class="verdict-box {verdict_class}" style="margin-top:14px; margin-bottom:18px;">
+      <div style="flex:1; margin-right:24px;">
+        <div style="font-size:16px; font-weight:800; display:flex; align-items:center; gap:8px; margin-bottom:8px;">
+          <span>{verdict_icon}</span> <span>{status_title}</span> &nbsp; {arch_html}
+        </div>
+        <div style="font-size:12px; color:#c9d1d9; line-height:1.6;">
+          {verdict_desc}
+        </div>
       </div>
-      <div style="text-align:right">
+      <div style="text-align:right; border-left:1px solid rgba(255,255,255,0.08); padding-left:20px; min-width:180px;">
         {verdict_details}
       </div>
     </div>
-    """, unsafe_allow_html=True)
+    ''', unsafe_allow_html=True)
 
-    # ── Live Surveillance Activity Explanation Panel ──
-    if analysis.recommended_action == "STAND_ASIDE":
-        st.markdown(f"""
-        <div class="info-panel" style="margin-top:-6px; margin-bottom:18px;">
-          <div class="info-panel-title">📡 Why Nothing Looks Like It Is Happening</div>
-          <div style="font-size:12px; color:#c9d1d9; line-height:1.6;">
-            The autonomous engine is actively scanning all <b>14 synthetic markets</b> every 10 seconds in the background.
-            Because <b>{selected_symbol}</b> is currently behaving as an unpredictable random walk ($H = {analysis.hurst.hurst_exponent:.3f}$), the quantitative brain <b>deliberately refuses to trade noise</b> to preserve your funds.
-            <br>🎯 <b>Next Action:</b> The engine will instantly execute as soon as a market reaches Edge ≥ 60%. To see all 14 markets right now, click the <b>⚡ Multi-Market Matrix</b> tab.
-          </div>
-        </div>
-        """, unsafe_allow_html=True)
-
-    # ── Plotly Candlestick Chart with Kalman Overlay ──
+    # ── Candlestick Chart + Returns Subplot ──
     fig = make_subplots(
-        rows=3, cols=1, shared_xaxes=True,
-        row_heights=[0.60, 0.20, 0.20],
+        rows=2, cols=1, shared_xaxes=True,
+        row_heights=[0.75, 0.25],
         vertical_spacing=0.03,
-        subplot_titles=("Price Action + Kalman Fair Value", "Bar Returns (%)", "Kalman Residuals")
+        subplot_titles=("Price Action + Kalman Fair Value Overlay", "Bar Returns (%)")
     )
 
     # Candlestick
@@ -959,21 +1067,9 @@ with tabs[0]:
         opacity=0.7,
     ), row=2, col=1)
 
-    # Kalman Residuals sub-panel
-    kalman_res = kalman_result.residuals
-    if len(kalman_res) == len(market_df):
-        res_colors = ["#388bfd" if r >= 0 else "#a371f7" for r in kalman_res]
-        fig.add_trace(go.Bar(
-            x=list(range(len(market_df))),
-            y=kalman_res,
-            marker_color=res_colors,
-            name="Kalman Residual",
-            opacity=0.6,
-        ), row=3, col=1)
-
     fig.update_layout(
         template="plotly_dark",
-        height=620,
+        height=520,
         margin=dict(l=15, r=15, t=35, b=15),
         xaxis_rangeslider_visible=False,
         hovermode="x unified",
@@ -995,99 +1091,99 @@ with tabs[0]:
     fig.update_yaxes(gridcolor="rgba(48, 54, 61, 0.3)", showgrid=True)
     st.plotly_chart(fig, key="main_chart")
 
-
     # ── Quantitative Decomposition Metric Cards (8 Cards) ──
     st.markdown('<div class="section-divider"></div>', unsafe_allow_html=True)
     st.markdown("#### 🧠 Stochastic Calculus & Kalman Decomposition")
-    # ── Row 1: Primary Quantitative Metrics (4 cards) ──
+
+    # Row 1: Hurst, OU, Garman-Klass, Entropy
     c1, c2, c3, c4 = st.columns(4)
     with c1:
         h_color = "#3fb950" if analysis.hurst.regime == "PERSISTENT" else ("#58a6ff" if analysis.hurst.regime == "ANTI_PERSISTENT" else "#7d8590")
         h_icon = "📈" if analysis.hurst.regime == "PERSISTENT" else ("🔄" if analysis.hurst.regime == "ANTI_PERSISTENT" else "🎲")
-        st.markdown(f"""
+        st.markdown(f'''
         <div class="quant-card">
           <div class="card-label">Fractal Hurst Exponent (H)</div>
           <div class="card-value" style="color:{h_color}">{h_icon} {analysis.hurst.hurst_exponent:.4f}</div>
           <div class="card-sub">{analysis.hurst.regime} · R²={analysis.hurst.r_squared:.3f}</div>
         </div>
-        """, unsafe_allow_html=True)
+        ''', unsafe_allow_html=True)
 
     with c2:
         ou_color = "#f85149" if abs(analysis.ou.current_zscore) >= 2.0 else ("#e3b341" if abs(analysis.ou.current_zscore) >= 1.5 else "#58a6ff")
         fpt_text = f"FPT: {analysis.ou.expected_fpt_bars:.0f}b" if getattr(analysis.ou, 'expected_fpt_bars', 0) > 0 else f"τ½: {analysis.ou.half_life:.1f}b"
-        st.markdown(f"""
+        st.markdown(f'''
         <div class="quant-card">
           <div class="card-label">O-U Mean Reversion Z-Score</div>
           <div class="card-value" style="color:{ou_color}">{analysis.ou.current_zscore:+.3f}σ</div>
           <div class="card-sub">{fpt_text} · p={getattr(analysis.ou, 'stationary_p_value', 0.5):.4f}</div>
         </div>
-        """, unsafe_allow_html=True)
+        ''', unsafe_allow_html=True)
 
     with c3:
-        st.markdown(f"""
+        st.markdown(f'''
         <div class="quant-card">
           <div class="card-label">Garman-Klass Volatility</div>
           <div class="card-value">{analysis.garman_klass_vol:.6f}</div>
           <div class="card-sub">7.4× Statistical Efficiency</div>
         </div>
-        """, unsafe_allow_html=True)
+        ''', unsafe_allow_html=True)
 
     with c4:
         ent_color = "#3fb950" if analysis.entropy.is_ordered else "#f85149"
         ent_icon = "✅" if analysis.entropy.is_ordered else "❌"
-        st.markdown(f"""
+        st.markdown(f'''
         <div class="quant-card">
           <div class="card-label">Shannon Information Entropy</div>
           <div class="card-value" style="color:{ent_color}">{ent_icon} {analysis.entropy.normalized_entropy:.4f}</div>
           <div class="card-sub">{'ORDERED · Predictable Flow' if analysis.entropy.is_ordered else 'DISORDERED · Random Drift'}</div>
         </div>
-        """, unsafe_allow_html=True)
+        ''', unsafe_allow_html=True)
 
-    # ── Row 2: Advanced Quantitative (Kalman, VaR, CVaR, Sharpe) ──
+    # Row 2: Kalman, VaR, CVaR, Sharpe
     k1, k2, k3, k4 = st.columns(4)
     with k1:
         kalman_dev = ((curr_price - analysis.kalman_fair_value) / curr_price * 100) if curr_price > 0 else 0
         kdev_color = "#f85149" if abs(kalman_dev) > 0.3 else "#3fb950"
-        st.markdown(f"""
+        st.markdown(f'''
         <div class="quant-card">
           <div class="card-label">Kalman Fair Value</div>
           <div class="card-value" style="font-size:20px;">{analysis.kalman_fair_value:.5f}</div>
           <div class="card-sub" style="color:{kdev_color}">Deviation: {kalman_dev:+.3f}% · Z={analysis.kalman_zscore:+.2f}σ</div>
         </div>
-        """, unsafe_allow_html=True)
+        ''', unsafe_allow_html=True)
 
     with k2:
         var_color = "#f85149" if analysis.var_95_pct > 3.0 else ("#e3b341" if analysis.var_95_pct > 1.5 else "#3fb950")
         gauge_pct = min(analysis.var_95_pct / 5.0 * 100, 100)
         risk_cls = "risk-high" if analysis.var_95_pct > 3.0 else ("risk-medium" if analysis.var_95_pct > 1.5 else "risk-low")
-        st.markdown(f"""
+        st.markdown(f'''
         <div class="quant-card">
           <div class="card-label">Value at Risk (95% · 5bar)</div>
           <div class="card-value" style="color:{var_color}; font-size:20px;">{analysis.var_95_pct:.3f}%</div>
           <div class="risk-gauge {risk_cls}"><div class="risk-gauge-fill" style="width:{gauge_pct:.0f}%"></div></div>
         </div>
-        """, unsafe_allow_html=True)
+        ''', unsafe_allow_html=True)
 
     with k3:
         cvar_color = "#f85149" if analysis.cvar_95_pct > 4.0 else ("#e3b341" if analysis.cvar_95_pct > 2.0 else "#3fb950")
-        st.markdown(f"""
+        st.markdown(f'''
         <div class="quant-card">
           <div class="card-label">CVaR / Expected Shortfall</div>
           <div class="card-value" style="color:{cvar_color}; font-size:20px;">{analysis.cvar_95_pct:.3f}%</div>
           <div class="card-sub">Tail Risk Beyond VaR Threshold</div>
         </div>
-        """, unsafe_allow_html=True)
+        ''', unsafe_allow_html=True)
 
     with k4:
         sharpe_val = analysis.instantaneous_sharpe
         sharpe_color = "#3fb950" if sharpe_val > 1.5 else ("#e3b341" if sharpe_val > 0.5 else "#f85149")
-        st.markdown(f"""
+        st.markdown(f'''
         <div class="quant-card">
           <div class="card-label">Instantaneous Sharpe Ratio</div>
           <div class="card-value" style="color:{sharpe_color}; font-size:20px;">{sharpe_val:+.3f}</div>
           <div class="card-sub">{'STRONG' if sharpe_val > 1.5 else ('MODERATE' if sharpe_val > 0.5 else 'WEAK')} Risk-Adjusted Return</div>
         </div>
-        """, unsafe_allow_html=True)
+        ''', unsafe_allow_html=True)
 
     # ── Specialized Sub-Panels ──
     st.markdown('<div class="section-divider"></div>', unsafe_allow_html=True)
@@ -1436,7 +1532,7 @@ Maximizes asymptotic growth rate. Zero probability of ruin.
 
 # ── Auto-Refresh Logic ────────────────────────────────────────────────────────
 if auto_refresh != "Off":
-    sec_map = {"5 seconds (Real-Time)": 5, "5 seconds": 5, "10 seconds": 10, "30 seconds": 30}
-    delay = sec_map.get(auto_refresh, 5)
+    sec_map = {"10 seconds": 10, "30 seconds": 30, "60 seconds": 60}
+    delay = sec_map.get(auto_refresh, 30)
     time.sleep(delay)
     st.rerun()
