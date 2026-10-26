@@ -380,6 +380,8 @@ def cmd_status() -> int:
 
 def run_cloud_surveillance_loop(cfg: SyntheticBotConfig, logger: logging.Logger) -> int:
     """Continuous 24/7 autonomous quantitative surveillance for cloud environments (Linux / Dokploy)."""
+    from datetime import datetime, timezone
+    from deriv_web_feed import get_deriv_live_candles
     from synthetic_backtester import generate_synthetic_market_data
     from synthetic_strategy import SyntheticStrategy
     from synthetic_risk_manager import SyntheticRiskManager
@@ -390,7 +392,7 @@ def run_cloud_surveillance_loop(cfg: SyntheticBotConfig, logger: logging.Logger)
         max_risk_pct=cfg.max_risk_pct,
         kelly_fraction=cfg.kelly_fraction,
         max_drawdown_limit=cfg.max_drawdown_limit,
-        max_open_trades=cfg.max_open_trades,
+        max_open_positions=cfg.max_open_trades,
     )
     strategy = SyntheticStrategy(
         brain=brain,
@@ -405,13 +407,22 @@ def run_cloud_surveillance_loop(cfg: SyntheticBotConfig, logger: logging.Logger)
     state_path = Path(cfg.state_path)
     state_path.parent.mkdir(parents=True, exist_ok=True)
 
+    pid_file = ROOT / "data" / "synthetic_bot.pid"
+    pid_file.parent.mkdir(parents=True, exist_ok=True)
+    pid_file.write_text(str(os.getpid()), encoding="utf-8")
+
     open_trades: Dict[str, Any] = {}
     closed_trades: List[Any] = []
+    equity = 10000.0
+    balance = 10000.0
+
     if state_path.exists():
         try:
             existing = json.loads(state_path.read_text(encoding="utf-8"))
             open_trades = existing.get("open_trades", {})
             closed_trades = existing.get("closed_trades", [])
+            equity = float(existing.get("equity", 10000.0))
+            balance = float(existing.get("balance", 10000.0))
         except Exception:
             pass
 
@@ -419,14 +430,85 @@ def run_cloud_surveillance_loop(cfg: SyntheticBotConfig, logger: logging.Logger)
     if notifier:
         notifier._send_message("⚡ QUANTA-SYNTH Cloud Engine started on Dokploy! 24/7 Autonomous surveillance active.")
 
-    logger.info("⚡ 24/7 Cloud Surveillance ACTIVE. Monitoring %d instruments. Press Ctrl+C to stop.", len(cfg.symbols))
+    logger.info("⚡ 24/7 Cloud Surveillance ACTIVE (PID %d). Monitoring %d instruments. Press Ctrl+C to stop.", os.getpid(), len(cfg.symbols))
 
     try:
         while True:
             cycle_count += 1
             for sym in cfg.symbols:
-                df = generate_synthetic_market_data(symbol=sym, n_bars=cfg.lookback_bars, seed=(hash(sym) + cycle_count) % 100000)
-                signal = strategy.evaluate(df, symbol=sym, account_balance=10000.0, timeframe=cfg.timeframe)
+                # 1. Fetch live Deriv WebSocket market candles
+                df = get_deriv_live_candles(sym, cfg.timeframe, cfg.lookback_bars)
+                if df is None or len(df) < 30:
+                    df = generate_synthetic_market_data(symbol=sym, n_bars=cfg.lookback_bars, seed=(hash(sym) + cycle_count) % 100000)
+
+                curr_p = float(df["close"].iloc[-1])
+
+                # 2. Position lifecycle management for open trades on this symbol
+                for ticket in list(open_trades.keys()):
+                    t = open_trades.get(ticket)
+                    if not t or t.get("symbol") != sym:
+                        continue
+
+                    direction = t.get("direction", "BUY")
+                    entry_p = float(t.get("entry_price", curr_p))
+                    sl_p = float(t.get("stop_loss", curr_p))
+                    tp_p = float(t.get("take_profit", curr_p))
+                    r_dist = max(abs(entry_p - sl_p), 1e-4)
+                    vol = float(t.get("volume", 0.1))
+
+                    closed = False
+                    reason = ""
+                    exit_price = curr_p
+
+                    if direction == "BUY":
+                        if curr_p >= tp_p:
+                            closed = True
+                            reason = "TAKE_PROFIT"
+                            exit_price = tp_p
+                        elif curr_p <= sl_p:
+                            closed = True
+                            reason = "STOP_LOSS"
+                            exit_price = sl_p
+                        elif curr_p >= entry_p + r_dist and not t.get("moved_to_be"):
+                            t["stop_loss"] = entry_p
+                            t["moved_to_be"] = True
+                            logger.info("🛡️ [BE LOCK] Ticket %s moved to Breakeven @ %.5f", ticket, entry_p)
+                    else:
+                        if curr_p <= tp_p:
+                            closed = True
+                            reason = "TAKE_PROFIT"
+                            exit_price = tp_p
+                        elif curr_p <= sl_p:
+                            closed = True
+                            reason = "STOP_LOSS"
+                            exit_price = sl_p
+                        elif curr_p <= entry_p - r_dist and not t.get("moved_to_be"):
+                            t["stop_loss"] = entry_p
+                            t["moved_to_be"] = True
+                            logger.info("🛡️ [BE LOCK] Ticket %s moved to Breakeven @ %.5f", ticket, entry_p)
+
+                    if closed:
+                        pnl_points = (exit_price - entry_p) if direction == "BUY" else (entry_p - exit_price)
+                        pnl_r = round(pnl_points / r_dist, 2)
+                        pnl_usd = round(pnl_points * vol * 10.0, 2)
+                        equity = round(equity + pnl_usd, 2)
+                        balance = round(balance + pnl_usd, 2)
+
+                        closed_trades.append({
+                            **t,
+                            "ticket": ticket,
+                            "exit_price": round(exit_price, 5),
+                            "closed_at": datetime.now(timezone.utc).isoformat(),
+                            "close_reason": reason,
+                            "pnl_r": pnl_r,
+                            "pnl_usd": pnl_usd,
+                        })
+                        del open_trades[ticket]
+                        logger.info("🏁 [TRADE CLOSED] #%s %s %s -> %s | PnL: %+.2fR ($%+.2f) | Equity: $%.2f",
+                                    ticket, direction, sym, reason, pnl_r, pnl_usd, equity)
+
+                # 3. Quantitative Signal Evaluation
+                signal = strategy.evaluate(df, symbol=sym, account_balance=equity, timeframe=cfg.timeframe)
                 if signal and signal.sizing and signal.sizing.is_valid:
                     ticket = str(900000 + (cycle_count * 100 + len(open_trades)) % 100000)
                     if len(open_trades) < cfg.max_open_trades and ticket not in open_trades:
@@ -461,14 +543,21 @@ def run_cloud_surveillance_loop(cfg: SyntheticBotConfig, logger: logging.Logger)
             payload = {
                 "open_trades": open_trades,
                 "closed_trades": closed_trades[-200:],
+                "equity": equity,
+                "balance": balance,
                 "updated_at": datetime.now(timezone.utc).isoformat(),
                 "cycle_count": cycle_count,
-                "mode": "CLOUD_AUTONOMOUS_PAPER",
+                "mode": "CLOUD_AUTONOMOUS_LIVE_WEB",
             }
             state_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+            if cycle_count % 5 == 1:
+                logger.info("⚡ [SURVEILLANCE HEARTBEAT] Cycle %d | Open Pos: %d | Equity: $%.2f | Monitored: %d instruments",
+                            cycle_count, len(open_trades), equity, len(cfg.symbols))
             time.sleep(cfg.poll_seconds)
     except KeyboardInterrupt:
         logger.info("Cloud surveillance engine stopped cleanly.")
+    finally:
+        pid_file.unlink(missing_ok=True)
     return 0
 
 

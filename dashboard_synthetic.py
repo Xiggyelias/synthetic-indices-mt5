@@ -397,6 +397,21 @@ header { visibility: hidden; }
 
 def get_bot_process() -> Optional[psutil.Process]:
     """Fast check if synthetic_bot.py is actively running in background."""
+    pid_file = ROOT / "data" / "synthetic_bot.pid"
+    if pid_file.exists():
+        try:
+            pid = int(pid_file.read_text(encoding="utf-8").strip())
+            proc = psutil.Process(pid)
+            if proc.is_running() and proc.status() != psutil.STATUS_ZOMBIE:
+                cmd = proc.cmdline()
+                cmd_str = " ".join(cmd).lower()
+                if "synthetic_bot.py" in cmd_str:
+                    return proc
+        except (psutil.NoSuchProcess, psutil.AccessDenied, ValueError):
+            pid_file.unlink(missing_ok=True)
+    except Exception:
+        pass
+
     try:
         for proc in psutil.process_iter(["pid", "name"]):
             try:
@@ -433,58 +448,55 @@ def is_terminal_running() -> bool:
     return False
 
 
-def get_live_mt5_connection(force_probe: bool = False) -> Tuple[Optional[MT5Connection], Optional[Any]]:
-    """Zero-latency MT5 connection check. Never blocks the page load."""
+def get_live_mt5_connection(force_probe: bool = False) -> Tuple[Optional[Any], Optional[Any]]:
+    """Zero-latency live connection check: native MT5 terminal or Deriv WebSocket cloud feed."""
     if "mt5_conn_cached" in st.session_state and not force_probe:
         return st.session_state["mt5_conn_cached"]
 
-    # 1. Fast guard: If MT5 module is missing (e.g. Linux / VPS / Docker), return immediately (0ms)
-    if mt5 is None:
-        res = (None, None)
-        st.session_state["mt5_conn_cached"] = res
-        return res
+    # 1. Probe native desktop MT5 terminal if running (Windows only)
+    if mt5 is not None and (is_terminal_running() or force_probe):
+        try:
+            path_val = os.getenv("MT5_PATH") or os.getenv("MT5_TERMINAL_PATH") or None
+            login_val = int(os.getenv("MT5_LOGIN", 0) or 0)
+            password_val = os.getenv("MT5_PASSWORD", "")
+            server_val = os.getenv("MT5_SERVER", "Deriv-Demo")
 
-    # 2. Fast guard: If terminal process is not running, DO NOT launch it during page render
-    if not is_terminal_running() and not force_probe:
-        res = (None, None)
-        st.session_state["mt5_conn_cached"] = res
-        return res
+            if login_val and password_val:
+                creds = MT5Credentials(
+                    login=login_val,
+                    password=password_val,
+                    server=server_val,
+                    terminal_path=path_val,
+                    path=path_val,
+                    portable=False,
+                    is_demo=True,
+                )
+                conn = MT5Connection(
+                    creds,
+                    app_name="dashboard",
+                    max_retries=1,
+                    retry_delay=0.0,
+                    auto_reconnect=False,
+                    initialize_timeout_ms=1000,
+                )
+                if conn.initialize():
+                    acc = conn.get_account_info()
+                    res = (conn, acc)
+                    st.session_state["mt5_conn_cached"] = res
+                    return res
+        except Exception as exc:
+            logging.getLogger("dashboard").debug(f"MT5 fast probe: {exc}")
 
+    # 2. Cloud Web Feed: Connect directly to Deriv's live public WebSocket API
     try:
-        path_val = os.getenv("MT5_PATH") or os.getenv("MT5_TERMINAL_PATH") or None
-        login_val = int(os.getenv("MT5_LOGIN", 0) or 0)
-        password_val = os.getenv("MT5_PASSWORD", "")
-        server_val = os.getenv("MT5_SERVER", "Deriv-Demo")
-
-        if not login_val or not password_val:
-            res = (None, None)
-            st.session_state["mt5_conn_cached"] = res
-            return res
-
-        creds = MT5Credentials(
-            login=login_val,
-            password=password_val,
-            server=server_val,
-            terminal_path=path_val,
-            path=path_val,
-            portable=False,
-            is_demo=True,
-        )
-        conn = MT5Connection(
-            creds,
-            app_name="dashboard",
-            max_retries=1,
-            retry_delay=0.0,
-            auto_reconnect=False,
-            initialize_timeout_ms=1000,
-        )
-        if conn.initialize():
-            acc = conn.get_account_info()
-            res = (conn, acc)
-            st.session_state["mt5_conn_cached"] = res
-            return res
-    except Exception as exc:
-        logging.getLogger("dashboard").debug(f"MT5 fast probe: {exc}")
+        from deriv_web_feed import DerivWebConnection
+        web_conn = DerivWebConnection(ROOT)
+        web_acc = web_conn.get_account_info()
+        res = (web_conn, web_acc)
+        st.session_state["mt5_conn_cached"] = res
+        return res
+    except Exception as w_exc:
+        logging.getLogger("dashboard").debug(f"Deriv web conn error: {w_exc}")
 
     res = (None, None)
     st.session_state["mt5_conn_cached"] = res
@@ -520,7 +532,10 @@ pulse_html = '<span class="pulse-dot-green"></span>' if is_bot_running else '<sp
 bot_status_str = f"AUTONOMOUS ENGINE: ACTIVE (PID {bot_pid})" if is_bot_running else "AUTONOMOUS ENGINE: STANDBY"
 
 if is_mt5_connected:
-    mt5_badge = f"🟢 MT5 LIVE: #{acc_info.login} ({acc_info.server}) | Equity: ${acc_info.equity:,.2f}"
+    if getattr(conn, "server", "") == "Deriv-WebSocket-Live" or "WebSocket" in str(getattr(acc_info, "server", "")):
+        mt5_badge = f"🟢 DERIV CLOUD LIVE: wss://api.derivws.com | Equity: ${acc_info.equity:,.2f}"
+    else:
+        mt5_badge = f"🟢 MT5 LIVE: #{acc_info.login} ({acc_info.server}) | Equity: ${acc_info.equity:,.2f}"
 elif is_bot_running:
     mt5_badge = "🟢 24/7 CLOUD AUTONOMOUS ENGINE ACTIVE"
 else:
@@ -574,9 +589,11 @@ data_feed_source = st.sidebar.radio(
     index=0
 )
 
-if st.sidebar.button("🔌 Connect Live MT5", help="Probe or attach to running MT5 terminal"):
+if st.sidebar.button("🔌 Connect Live Feed (Deriv Web / MT5)", help="Connect directly to live Deriv WebSockets or desktop MT5 terminal"):
     st.session_state.pop("mt5_conn_cached", None)
     get_live_mt5_connection(force_probe=True)
+    st.sidebar.success("Live market feed connected!")
+    time.sleep(0.5)
     st.rerun()
 
 st.sidebar.markdown("---")
@@ -584,31 +601,56 @@ st.sidebar.markdown("### ⚙️ Autonomous Engine")
 
 btn_col1, btn_col2 = st.sidebar.columns(2)
 if btn_col1.button("▶️ Launch", disabled=is_bot_running):
+    log_dir = ROOT / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_file = log_dir / "synthetic_bot.log"
+    log_out = open(log_file, "a", encoding="utf-8")
+
     cmd = [sys.executable, str(ROOT / "synthetic_bot.py"), "--run"]
-    subprocess.Popen(
+    proc = subprocess.Popen(
         cmd,
         cwd=str(ROOT),
         creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == "win32" else 0,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        stdout=log_out,
+        stderr=log_out,
     )
-    st.sidebar.success("Autonomous engine started!")
+    pid_file = ROOT / "data" / "synthetic_bot.pid"
+    pid_file.parent.mkdir(parents=True, exist_ok=True)
+    pid_file.write_text(str(proc.pid), encoding="utf-8")
+    st.cache_data.clear()
+    st.sidebar.success(f"Autonomous engine started! (PID {proc.pid})")
     time.sleep(1)
     st.rerun()
 
 if btn_col2.button("⏹️ Kill", disabled=not is_bot_running):
-    if bot_proc:
+    pid_file = ROOT / "data" / "synthetic_bot.pid"
+    killed = False
+    if pid_file.exists():
+        try:
+            pid = int(pid_file.read_text(encoding="utf-8").strip())
+            p = psutil.Process(pid)
+            p.terminate()
+            try:
+                p.wait(timeout=2)
+            except Exception:
+                p.kill()
+            killed = True
+        except Exception:
+            pass
+        pid_file.unlink(missing_ok=True)
+    if bot_proc and not killed:
         try:
             bot_proc.terminate()
-            bot_proc.wait(timeout=3)
+            bot_proc.wait(timeout=2)
         except Exception:
             try:
                 bot_proc.kill()
             except Exception:
                 pass
-        st.sidebar.warning("Autonomous engine terminated.")
-        time.sleep(1)
-        st.rerun()
+    st.cache_data.clear()
+    st.sidebar.warning("Autonomous engine terminated.")
+    time.sleep(1)
+    st.rerun()
 
 st.sidebar.markdown("---")
 auto_refresh = st.sidebar.selectbox("Auto-Refresh Interval", ["Off", "5 seconds", "10 seconds", "30 seconds"], index=0)
@@ -619,14 +661,24 @@ auto_refresh = st.sidebar.selectbox("Auto-Refresh Interval", ["Off", "5 seconds"
 market_df: Optional[pd.DataFrame] = None
 data_mode = "SIMULATED"
 
-if data_feed_source.startswith("Automatic") and is_mt5_connected and conn:
+if data_feed_source.startswith("Automatic") and conn:
     try:
         resolved_sym = conn.ensure_symbol(selected_symbol)
         if resolved_sym:
             rates = conn.get_rates(selected_symbol, selected_tf, sample_size)
             if rates is not None and len(rates) >= 30:
-                market_df = pd.DataFrame(rates)
-                data_mode = "LIVE_MT5"
+                market_df = rates if isinstance(rates, pd.DataFrame) else pd.DataFrame(rates)
+                data_mode = "LIVE_DERIV_WEB" if getattr(conn, "server", "") == "Deriv-WebSocket-Live" else "LIVE_MT5"
+    except Exception:
+        pass
+
+if market_df is None and data_feed_source.startswith("Automatic"):
+    try:
+        from deriv_web_feed import get_deriv_live_candles
+        live_df = get_deriv_live_candles(selected_symbol, selected_tf, sample_size)
+        if live_df is not None and len(live_df) >= 30:
+            market_df = live_df
+            data_mode = "LIVE_DERIV_WEB"
     except Exception:
         pass
 
@@ -663,7 +715,9 @@ with tabs[0]:
     # Also compute Kalman for chart overlay
     kalman_result = fit_kalman_filter(market_df["close"])
 
-    if data_mode == "LIVE_MT5":
+    if data_mode == "LIVE_DERIV_WEB":
+        feed_badge = "🟢 DERIV WEB LIVE (api.derivws.com)"
+    elif data_mode == "LIVE_MT5":
         feed_badge = "🟢 LIVE MT5 FEED"
     elif is_bot_running:
         feed_badge = "🟢 24/7 CLOUD QUANT ENGINE"
@@ -920,17 +974,21 @@ with tabs[1]:
             ]
 
             scan_brain = CalculativeBrain()
+            from deriv_web_feed import get_deriv_live_candles
             for sym_item in all_syms:
                 sym_df = None
-                if is_mt5_connected and conn:
+                if conn:
                     try:
                         res_s = conn.ensure_symbol(sym_item)
                         if res_s:
                             s_rates = conn.get_rates(sym_item, selected_tf, 120)
                             if s_rates is not None and len(s_rates) >= 30:
-                                sym_df = pd.DataFrame(s_rates)
+                                sym_df = s_rates if isinstance(s_rates, pd.DataFrame) else pd.DataFrame(s_rates)
                     except Exception:
                         sym_df = None
+
+                if sym_df is None:
+                    sym_df = get_deriv_live_candles(sym_item, selected_tf, 120)
 
                 if sym_df is None:
                     sym_df = generate_synthetic_market_data(sym_item, n_bars=120, seed=hash(sym_item) % 100000)
@@ -995,18 +1053,22 @@ with tabs[2]:
 
     bc1, bc2, bc3 = st.columns([1, 1, 1])
     with bc1:
-        sim_bars = st.slider("Simulation Bars", min_value=300, max_value=3000, value=800, step=100)
+        sim_bars = st.slider("Simulation Bars", min_value=100, max_value=2000, value=500, step=50)
     with bc2:
         start_cap = st.number_input("Starting Capital ($)", min_value=100.0, max_value=1000000.0, value=10000.0, step=500.0)
     with bc3:
-        st.write("")
-        st.write("")
+        bt_data_mode = st.selectbox("Data Mode", ["Live Deriv Market History", "Monte Carlo SDE Simulation"], index=0)
         run_bt = st.button("🚀 Execute Backtest", type="primary")
 
     if run_bt or "last_report" in st.session_state:
         if run_bt:
-            with st.spinner("Running stochastic simulation..."):
-                bt_data = generate_synthetic_market_data(symbol=selected_symbol, n_bars=sim_bars, seed=77)
+            with st.spinner(f"Running quantitative backtest on {selected_symbol}..."):
+                from deriv_web_feed import get_deriv_live_candles
+                bt_data = None
+                if bt_data_mode == "Live Deriv Market History":
+                    bt_data = get_deriv_live_candles(selected_symbol, selected_tf, min(sim_bars, 500))
+                if bt_data is None or len(bt_data) < 30:
+                    bt_data = generate_synthetic_market_data(symbol=selected_symbol, n_bars=sim_bars, seed=77)
                 engine = SyntheticBacktestEngine(initial_balance=start_cap)
                 report = engine.run(df=bt_data, symbol=selected_symbol)
                 st.session_state["last_report"] = report
@@ -1102,13 +1164,27 @@ with tabs[4]:
     st.subheader("📋 Active Positions & Trade History")
     state_file = ROOT / "data" / "synthetic_state.json"
 
+    tcol1, tcol2 = st.columns([3, 1])
+    with tcol2:
+        if st.button("🔄 Refresh Trades"):
+            st.rerun()
+
     if not state_file.exists():
-        st.info("No trades recorded yet. Start the autonomous engine to begin trading.")
+        st.info("No trades recorded yet. Start the autonomous engine (▶ Launch) to begin autonomous surveillance & trading.")
     else:
         try:
             data = json.loads(state_file.read_text(encoding="utf-8"))
             open_pos = data.get("open_trades", {})
             closed_pos = data.get("closed_trades", [])
+            state_eq = float(data.get("equity", 10000.0))
+            state_bal = float(data.get("balance", 10000.0))
+            total_pnl = state_eq - 10000.0
+
+            tm1, tm2, tm3, tm4 = st.columns(4)
+            tm1.metric("Engine Mode", data.get("mode", "LIVE_WEB"), "24/7 Autonomous" if is_bot_running else "Standby")
+            tm2.metric("Portfolio Equity", f"${state_eq:,.2f}", f"{total_pnl:+,.2f}")
+            tm3.metric("Active Positions", f"{len(open_pos)} / 6")
+            tm4.metric("Closed Trades", f"{len(closed_pos)}")
 
             if open_pos:
                 st.markdown("##### 📂 Active Positions")

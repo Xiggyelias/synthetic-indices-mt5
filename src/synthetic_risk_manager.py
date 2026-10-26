@@ -70,8 +70,11 @@ class SyntheticRiskManager:
         kelly_fraction: float = 0.35,
         max_drawdown_limit: float = 0.18,
         max_open_positions: int = 6,
+        max_open_trades: Optional[int] = None,
         aggressive_mode: bool = False,
     ):
+        if max_open_trades is not None:
+            max_open_positions = max_open_trades
         self.aggressive_mode = aggressive_mode
         self.max_risk_pct = max_risk_pct
         self.kelly_fraction = kelly_fraction
