@@ -397,18 +397,19 @@ header { visibility: hidden; }
 
 def get_bot_process() -> Optional[psutil.Process]:
     """Fast check if synthetic_bot.py is actively running in background."""
-    pid_file = ROOT / "data" / "synthetic_bot.pid"
-    if pid_file.exists():
-        try:
-            pid = int(pid_file.read_text(encoding="utf-8").strip())
-            proc = psutil.Process(pid)
-            if proc.is_running() and proc.status() != psutil.STATUS_ZOMBIE:
-                cmd = proc.cmdline()
-                cmd_str = " ".join(cmd).lower()
-                if "synthetic_bot.py" in cmd_str:
-                    return proc
-        except (psutil.NoSuchProcess, psutil.AccessDenied, ValueError):
-            pid_file.unlink(missing_ok=True)
+    try:
+        pid_file = ROOT / "data" / "synthetic_bot.pid"
+        if pid_file.exists():
+            try:
+                pid = int(pid_file.read_text(encoding="utf-8").strip())
+                proc = psutil.Process(pid)
+                if proc.is_running() and proc.status() != psutil.STATUS_ZOMBIE:
+                    cmd = proc.cmdline()
+                    cmd_str = " ".join(cmd).lower()
+                    if "synthetic_bot.py" in cmd_str:
+                        return proc
+            except (psutil.NoSuchProcess, psutil.AccessDenied, ValueError):
+                pid_file.unlink(missing_ok=True)
     except Exception:
         pass
 
