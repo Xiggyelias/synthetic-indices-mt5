@@ -559,6 +559,17 @@ header {
 </style>
 """, unsafe_allow_html=True)
 
+def clean_html(html_str: str) -> str:
+    """Strip all leading and trailing whitespace from each line to prevent Markdown code-block interpretation."""
+    clean_lines = [line.strip() for line in html_str.strip().splitlines() if line.strip()]
+    return "".join(clean_lines)
+
+
+def render_html(html_str: str) -> None:
+    """Render HTML safely in Streamlit with zero risk of CommonMark 4-space code block bugs."""
+    st.markdown(clean_html(html_str), unsafe_allow_html=True)
+
+
 
 # ── Process & Connection Helpers ──────────────────────────────────────────────
 
@@ -782,7 +793,13 @@ if state_file.exists():
     except Exception:
         pass
 
-cycle_num = engine_state.get("cycle_count", "—")
+raw_cycle = engine_state.get("cycle_count", None)
+if raw_cycle is not None:
+    cycle_num = f"#{raw_cycle}"
+elif is_bot_running:
+    cycle_num = "Active (Scanning)"
+else:
+    cycle_num = "Standby"
 last_updated = engine_state.get("updated_at", "")
 if last_updated:
     try:
@@ -795,14 +812,14 @@ else:
 
 open_pos_count = len(engine_state.get("open_trades", {}))
 
-st.markdown(f'''
+render_html(f'''
 <div class="hero-command-bar">
   <div class="cmd-bar-left">
     <div class="cmd-bar-title">⚡ QUANTA-SYNTH <span class="cmd-bar-badge">v5.0 ELITE</span></div>
     <div class="cmd-bar-sub">{mt5_badge}</div>
   </div>
   <div class="cmd-bar-center">
-    <div class="radar-pill">⚡ <b>Scan Cycle:</b> #{cycle_num}</div>
+    <div class="radar-pill">⚡ <b>Cycle:</b> {cycle_num}</div>
     <div class="radar-pill">📡 <b>Coverage:</b> 14 Markets</div>
     <div class="radar-pill">🛡️ <b>Shield:</b> Guarding Capital</div>
     <div class="radar-pill">📊 <b>Trades:</b> {open_pos_count}</div>
@@ -814,7 +831,7 @@ st.markdown(f'''
     </div>
   </div>
 </div>
-''', unsafe_allow_html=True)
+''')
 
 # ── Sidebar Controls ──────────────────────────────────────────────────────────
 
@@ -974,7 +991,7 @@ with tabs[0]:
                 st.rerun()
 
     # ── Quick Market Hop (2 rows x 3 columns) ──
-    st.markdown('<div style="font-size:11px; text-transform:uppercase; letter-spacing:1px; color:#7d8590; margin-top:4px; margin-bottom:8px; font-weight:700;">⚡ Quick Market Hop</div>', unsafe_allow_html=True)
+    render_html('<div style="font-size:11px; text-transform:uppercase; letter-spacing:1px; color:#7d8590; margin-top:4px; margin-bottom:8px; font-weight:700;">⚡ Quick Market Hop</div>')
     q_row1 = st.columns(3)
     q_row2 = st.columns(3)
     quick_markets = [
@@ -1009,16 +1026,8 @@ with tabs[0]:
 
     if analysis.recommended_action == "STAND_ASIDE":
         status_title = "CAPITAL SHIELD ACTIVE · REFUSING NOISE"
-        verdict_desc = f'''
-        <b>Status:</b> Market is behaving as a Brownian random walk (Fractal Hurst <b>H = {analysis.hurst.hurst_exponent:.3f}</b>, R² = {analysis.hurst.r_squared:.2f}).
-        <br><b>Algorithmic Action:</b> The calculative brain <b>deliberately refuses to trade noise</b> to preserve your funds.
-        Surveillance is actively scanning all <b>14 synthetic markets</b> every 10s and will execute the instant statistical asymmetry reaches <b>Edge ≥ 60%</b>.
-        '''
-        verdict_details = f'''
-        <div style="font-size:13px; font-weight:700; color:#58a6ff; font-family:'JetBrains Mono',monospace;">MATH EDGE: {analysis.math_edge_score}/100</div>
-        <div style="font-size:11px; margin-top:4px; color:#7d8590;">Required: ≥ 60/100</div>
-        <div style="font-size:11px; margin-top:4px; color:#8b949e;">Price: {curr_price:,.2f}</div>
-        '''
+        verdict_desc = f"<b>Market State:</b> Random walk regime (Fractal Hurst <b>H = {analysis.hurst.hurst_exponent:.3f}</b>, R² = {analysis.hurst.r_squared:.2f}).<br><b>Autonomous Shield:</b> The calculative brain <b>deliberately refuses to trade noise</b> to protect your capital. Background surveillance is actively scanning all <b>14 synthetic markets</b> every 10s and will trigger an order the moment statistical asymmetry reaches <b>Edge ≥ 60%</b>."
+        verdict_details = f"<div style='font-size:13px; font-weight:700; color:#58a6ff; font-family:monospace;'>MATH EDGE: {analysis.math_edge_score:.1f}/100</div><div style='font-size:11px; margin-top:4px; color:#7d8590;'>Required: ≥ 60/100</div><div style='font-size:11px; margin-top:4px; color:#8b949e;'>Price: {curr_price:,.2f}</div>" 
     else:
         status_title = f"{analysis.recommended_action} · STATISTICAL EDGE CONFIRMED"
         verdict_desc = f'''
@@ -1031,7 +1040,7 @@ with tabs[0]:
         <div style="font-size:11px; margin-top:4px; color:#7d8590;">Horizon: {analysis.half_life_horizon_bars}b</div>
         '''
 
-    st.markdown(f'''
+    render_html(f'''
     <div class="verdict-box {verdict_class}" style="margin-top:14px; margin-bottom:18px;">
       <div style="flex:1; margin-right:24px;">
         <div style="font-size:16px; font-weight:800; display:flex; align-items:center; gap:8px; margin-bottom:8px;">
@@ -1045,7 +1054,7 @@ with tabs[0]:
         {verdict_details}
       </div>
     </div>
-    ''', unsafe_allow_html=True)
+    ''')
 
     # ── Candlestick Chart + Returns Subplot ──
     fig = make_subplots(
@@ -1132,7 +1141,7 @@ with tabs[0]:
     st.plotly_chart(fig, key="main_chart")
 
     # ── Quantitative Decomposition Metric Cards (8 Cards) ──
-    st.markdown('<div class="section-divider"></div>', unsafe_allow_html=True)
+    render_html('<div class="section-divider"></div>')
     st.markdown("#### 🧠 Stochastic Calculus & Kalman Decomposition")
 
     # Row 1: Hurst, OU, Garman-Klass, Entropy
@@ -1140,93 +1149,77 @@ with tabs[0]:
     with c1:
         h_color = "#3fb950" if analysis.hurst.regime == "PERSISTENT" else ("#58a6ff" if analysis.hurst.regime == "ANTI_PERSISTENT" else "#7d8590")
         h_icon = "📈" if analysis.hurst.regime == "PERSISTENT" else ("🔄" if analysis.hurst.regime == "ANTI_PERSISTENT" else "🎲")
-        st.markdown(f'''
-        <div class="quant-card">
+        render_html(f'''<div class="quant-card">
           <div class="card-label">Fractal Hurst Exponent (H)</div>
           <div class="card-value" style="color:{h_color}">{h_icon} {analysis.hurst.hurst_exponent:.4f}</div>
           <div class="card-sub">{analysis.hurst.regime} · R²={analysis.hurst.r_squared:.3f}</div>
-        </div>
-        ''', unsafe_allow_html=True)
+        </div>''')
 
     with c2:
         ou_color = "#f85149" if abs(analysis.ou.current_zscore) >= 2.0 else ("#e3b341" if abs(analysis.ou.current_zscore) >= 1.5 else "#58a6ff")
         fpt_text = f"FPT: {analysis.ou.expected_fpt_bars:.0f}b" if getattr(analysis.ou, 'expected_fpt_bars', 0) > 0 else f"τ½: {analysis.ou.half_life:.1f}b"
-        st.markdown(f'''
-        <div class="quant-card">
+        render_html(f'''<div class="quant-card">
           <div class="card-label">O-U Mean Reversion Z-Score</div>
           <div class="card-value" style="color:{ou_color}">{analysis.ou.current_zscore:+.3f}σ</div>
           <div class="card-sub">{fpt_text} · p={getattr(analysis.ou, 'stationary_p_value', 0.5):.4f}</div>
-        </div>
-        ''', unsafe_allow_html=True)
+        </div>''')
 
     with c3:
-        st.markdown(f'''
-        <div class="quant-card">
+        render_html(f'''<div class="quant-card">
           <div class="card-label">Garman-Klass Volatility</div>
           <div class="card-value">{analysis.garman_klass_vol:.6f}</div>
           <div class="card-sub">7.4× Statistical Efficiency</div>
-        </div>
-        ''', unsafe_allow_html=True)
+        </div>''')
 
     with c4:
         ent_color = "#3fb950" if analysis.entropy.is_ordered else "#f85149"
         ent_icon = "✅" if analysis.entropy.is_ordered else "❌"
-        st.markdown(f'''
-        <div class="quant-card">
+        render_html(f'''<div class="quant-card">
           <div class="card-label">Shannon Information Entropy</div>
           <div class="card-value" style="color:{ent_color}">{ent_icon} {analysis.entropy.normalized_entropy:.4f}</div>
           <div class="card-sub">{'ORDERED · Predictable Flow' if analysis.entropy.is_ordered else 'DISORDERED · Random Drift'}</div>
-        </div>
-        ''', unsafe_allow_html=True)
+        </div>''')
 
     # Row 2: Kalman, VaR, CVaR, Sharpe
     k1, k2, k3, k4 = st.columns(4)
     with k1:
         kalman_dev = ((curr_price - analysis.kalman_fair_value) / curr_price * 100) if curr_price > 0 else 0
         kdev_color = "#f85149" if abs(kalman_dev) > 0.3 else "#3fb950"
-        st.markdown(f'''
-        <div class="quant-card">
+        render_html(f'''<div class="quant-card">
           <div class="card-label">Kalman Fair Value</div>
           <div class="card-value" style="font-size:20px;">{analysis.kalman_fair_value:.5f}</div>
           <div class="card-sub" style="color:{kdev_color}">Deviation: {kalman_dev:+.3f}% · Z={analysis.kalman_zscore:+.2f}σ</div>
-        </div>
-        ''', unsafe_allow_html=True)
+        </div>''')
 
     with k2:
         var_color = "#f85149" if analysis.var_95_pct > 3.0 else ("#e3b341" if analysis.var_95_pct > 1.5 else "#3fb950")
         gauge_pct = min(analysis.var_95_pct / 5.0 * 100, 100)
         risk_cls = "risk-high" if analysis.var_95_pct > 3.0 else ("risk-medium" if analysis.var_95_pct > 1.5 else "risk-low")
-        st.markdown(f'''
-        <div class="quant-card">
+        render_html(f'''<div class="quant-card">
           <div class="card-label">Value at Risk (95% · 5bar)</div>
           <div class="card-value" style="color:{var_color}; font-size:20px;">{analysis.var_95_pct:.3f}%</div>
           <div class="risk-gauge {risk_cls}"><div class="risk-gauge-fill" style="width:{gauge_pct:.0f}%"></div></div>
-        </div>
-        ''', unsafe_allow_html=True)
+        </div>''')
 
     with k3:
         cvar_color = "#f85149" if analysis.cvar_95_pct > 4.0 else ("#e3b341" if analysis.cvar_95_pct > 2.0 else "#3fb950")
-        st.markdown(f'''
-        <div class="quant-card">
+        render_html(f'''<div class="quant-card">
           <div class="card-label">CVaR / Expected Shortfall</div>
           <div class="card-value" style="color:{cvar_color}; font-size:20px;">{analysis.cvar_95_pct:.3f}%</div>
           <div class="card-sub">Tail Risk Beyond VaR Threshold</div>
-        </div>
-        ''', unsafe_allow_html=True)
+        </div>''')
 
     with k4:
         sharpe_val = analysis.instantaneous_sharpe
         sharpe_color = "#3fb950" if sharpe_val > 1.5 else ("#e3b341" if sharpe_val > 0.5 else "#f85149")
-        st.markdown(f'''
-        <div class="quant-card">
+        render_html(f'''<div class="quant-card">
           <div class="card-label">Instantaneous Sharpe Ratio</div>
           <div class="card-value" style="color:{sharpe_color}; font-size:20px;">{sharpe_val:+.3f}</div>
           <div class="card-sub">{'STRONG' if sharpe_val > 1.5 else ('MODERATE' if sharpe_val > 0.5 else 'WEAK')} Risk-Adjusted Return</div>
-        </div>
-        ''', unsafe_allow_html=True)
+        </div>''')
 
     # ── Specialized Sub-Panels ──
-    st.markdown('<div class="section-divider"></div>', unsafe_allow_html=True)
+    render_html('<div class="section-divider"></div>')
 
     if analysis.poisson:
         st.markdown("#### 💥 Boom / Crash Poisson-Hawkes Hazard Engine")
@@ -1308,8 +1301,7 @@ with tabs[1]:
     cached_m = st.session_state.get("scan_matrix_cache", None)
     if cached_m is not None and not cached_m.empty:
         best_pick = cached_m.iloc[0]
-        st.markdown(f"""
-        <div class="verdict-box verdict-buy" style="margin-bottom:16px;">
+        render_html(f'''<div class="verdict-box verdict-buy" style="margin-bottom:16px;">
           <div>
             <div style="font-size:15px; font-weight:800;">🏆 HIGHEST CONVICTION: {best_pick['Symbol']}</div>
             <div style="font-size:12px; margin-top:4px;">Action: <b>{best_pick['Action']}</b> · Edge: <b>{best_pick['Edge']:.1f}/100</b> · Archetype: <b>{best_pick['Archetype']}</b></div>
@@ -1317,8 +1309,7 @@ with tabs[1]:
           <div style="text-align:right">
             <div style="font-size:13px; font-weight:700; font-family:'JetBrains Mono',monospace;">Win: {best_pick['Win%']} · R:R {best_pick['R:R']} · VaR: {best_pick['VaR%']}%</div>
           </div>
-        </div>
-        """, unsafe_allow_html=True)
+        </div>''')
 
         # Color-code the action column
         def highlight_action(row):
@@ -1437,15 +1428,13 @@ with tabs[3]:
 
         expectancy = win_p * rr_ratio - (1 - win_p)
         exp_color = "green" if expectancy > 0 else "red"
-        st.markdown(f"""
-        <div class="info-panel">
+        render_html(f'''<div class="info-panel">
           <div class="info-panel-title">Mathematical Expectancy</div>
           <div style="font-size:14px; font-family:'JetBrains Mono',monospace; color:{'#3fb950' if expectancy > 0 else '#f85149'};">
             E[R] = ({win_p:.2f} × {rr_ratio:.1f}) - (1 - {win_p:.2f}) = <b>{expectancy:+.3f}R</b> per trade
           </div>
           <div style="font-size:11px; color:#7d8590; margin-top:6px;">Kelly Criterion guarantees zero probability of ruin with positive expectancy.</div>
-        </div>
-        """, unsafe_allow_html=True)
+        </div>''')
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -1536,7 +1525,7 @@ with tabs[5]:
             if search_query:
                 tail_lines = [l for l in tail_lines if search_query.lower() in l.lower()]
 
-            st.markdown(f'<div class="log-container">{"<br>".join(tail_lines) if tail_lines else "(no matching entries)"}</div>', unsafe_allow_html=True)
+            render_html(f'<div class="log-container">{"<br>".join(tail_lines) if tail_lines else "(no matching entries)"}</div>')
             st.caption(f"Showing {len(tail_lines)} lines from `{log_file}` · Autonomous Engine Active (PID {bot_pid})")
         except Exception as log_exc:
             st.error(f"Error reading logs: {log_exc}")
