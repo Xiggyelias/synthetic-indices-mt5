@@ -47,17 +47,13 @@ from synthetic_strategy import var_risk_level
 def setup_logger(verbose: bool = False) -> logging.Logger:
     logger = logging.getLogger("synthetic-quant-bot")
     logger.setLevel(logging.DEBUG if verbose else logging.INFO)
-    if not logger.handlers:
-        fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
-        ch = logging.StreamHandler(sys.stdout)
-        ch.setFormatter(fmt)
-        logger.addHandler(ch)
+    logger.propagate = False
+    logger.handlers.clear()
 
-        log_dir = ROOT / "logs"
-        log_dir.mkdir(parents=True, exist_ok=True)
-        fh = logging.FileHandler(log_dir / "synthetic_bot.log", encoding="utf-8")
-        fh.setFormatter(fmt)
-        logger.addHandler(fh)
+    fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
+    ch = logging.StreamHandler(sys.stdout)
+    ch.setFormatter(fmt)
+    logger.addHandler(ch)
     return logger
 
 
