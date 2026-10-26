@@ -1014,7 +1014,7 @@ with tabs[0]:
         feed_badge = "⚡ QUANT MATRIX STREAM"
 
     # ── Top Bar: Quick Sync, Direct Engine Control & Market Info ──
-    sync_c1, sync_c2, sync_c3 = st.columns([2, 1, 1])
+    sync_c1, sync_c2, sync_c3, sync_c4 = st.columns([2, 1, 1, 1])
     with sync_c1:
         st.caption(f"**{selected_symbol}** · {selected_tf} · {feed_badge} · {len(market_df)} Live Bars · Synced: {datetime.now(timezone.utc).strftime('%H:%M:%S UTC')}")
     with sync_c2:
@@ -1028,18 +1028,17 @@ with tabs[0]:
             time.sleep(0.3)
             st.rerun()
     with sync_c3:
-        if is_bot_running:
-            if st.button("⏹️ Stop Engine", key="stop_engine_top_btn", type="secondary", use_container_width=True):
-                kill_autonomous_bot()
-                st.toast("⏹️ Autonomous Engine Stopped.", icon="🛑")
-                time.sleep(0.5)
-                st.rerun()
-        else:
-            if st.button("▶️ Launch Engine", key="launch_engine_top_btn", type="primary", use_container_width=True):
-                new_pid = launch_autonomous_bot()
-                st.toast(f"▶️ Autonomous Engine Active (PID {new_pid})!", icon="🟢")
-                time.sleep(0.5)
-                st.rerun()
+        if st.button("▶️ Launch Engine", key="launch_engine_top_btn", disabled=is_bot_running, type="primary" if not is_bot_running else "secondary", use_container_width=True):
+            new_pid = launch_autonomous_bot()
+            st.toast(f"▶️ Autonomous Engine Active (PID {new_pid})!", icon="🟢")
+            time.sleep(0.5)
+            st.rerun()
+    with sync_c4:
+        if st.button("⏹️ Stop Engine", key="stop_engine_top_btn", disabled=not is_bot_running, type="secondary", use_container_width=True):
+            kill_autonomous_bot()
+            st.toast("⏹️ Autonomous Engine Stopped.", icon="🛑")
+            time.sleep(0.5)
+            st.rerun()
 
     # ── Quick Market Hop (2 rows x 3 columns) ──
     render_html('<div style="font-size:11px; text-transform:uppercase; letter-spacing:1px; color:#7d8590; margin-top:4px; margin-bottom:8px; font-weight:700;">⚡ Quick Market Hop</div>')
