@@ -541,13 +541,17 @@ header {
 [data-testid="collapsedControl"] {
     display: flex !important;
     visibility: visible !important;
-    z-index: 999999 !important;
-    color: #58a6ff !important;
+    opacity: 1 !important;
+    z-index: 9999999 !important;
+    position: fixed !important;
+    top: 14px !important;
+    left: 14px !important;
     background: rgba(13, 20, 36, 0.95) !important;
-    border: 1px solid rgba(56, 139, 253, 0.4) !important;
+    border: 1.5px solid #388bfd !important;
     border-radius: 8px !important;
     padding: 6px 10px !important;
-    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.5) !important;
+    box-shadow: 0 0 16px rgba(56, 139, 253, 0.4) !important;
+    cursor: pointer !important;
 }
 [data-testid="stSidebarCollapseButton"] {
     color: #58a6ff !important;
@@ -598,6 +602,63 @@ def get_cached_bot_status() -> Tuple[bool, Optional[int]]:
     if proc:
         return True, proc.pid
     return False, None
+
+
+def launch_autonomous_bot() -> Optional[int]:
+    """Launch synthetic_bot.py as a 24/7 background process and record PID."""
+    try:
+        log_dir = ROOT / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        log_file = log_dir / "synthetic_bot.log"
+        log_out = open(log_file, "a", encoding="utf-8")
+
+        cmd = [sys.executable, str(ROOT / "synthetic_bot.py"), "--run"]
+        proc = subprocess.Popen(
+            cmd,
+            cwd=str(ROOT),
+            creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == "win32" else 0,
+            stdout=log_out,
+            stderr=log_out,
+        )
+        pid_file = ROOT / "data" / "synthetic_bot.pid"
+        pid_file.parent.mkdir(parents=True, exist_ok=True)
+        pid_file.write_text(str(proc.pid), encoding="utf-8")
+        st.cache_data.clear()
+        return proc.pid
+    except Exception as exc:
+        logging.getLogger("dashboard").error(f"Failed to launch autonomous bot: {exc}")
+        return None
+
+
+def kill_autonomous_bot() -> bool:
+    """Safely terminate synthetic_bot.py process and clean PID file."""
+    pid_file = ROOT / "data" / "synthetic_bot.pid"
+    killed = False
+    if pid_file.exists():
+        try:
+            pid = int(pid_file.read_text(encoding="utf-8").strip())
+            p = psutil.Process(pid)
+            p.terminate()
+            try:
+                p.wait(timeout=2)
+            except Exception:
+                p.kill()
+            killed = True
+        except Exception:
+            pass
+        pid_file.unlink(missing_ok=True)
+    bot_proc = get_bot_process()
+    if bot_proc and not killed:
+        try:
+            bot_proc.terminate()
+            bot_proc.wait(timeout=2)
+        except Exception:
+            try:
+                bot_proc.kill()
+            except Exception:
+                pass
+    st.cache_data.clear()
+    return True
 
 
 def is_terminal_running() -> bool:
@@ -686,6 +747,12 @@ def archetype_badge(archetype: str) -> str:
 # ── Top Telemetry & Unified Command Bar ───────────────────────────────────────
 
 is_bot_running, bot_pid = get_cached_bot_status()
+
+# Auto-start 24/7 autonomous bot if in cloud container and not yet active
+if not is_bot_running and os.getenv("AUTONOMOUS_AUTOSTART", "true").lower() == "true":
+    bot_pid = launch_autonomous_bot()
+    is_bot_running = bot_pid is not None
+
 bot_proc = get_bot_process()
 
 # Check connection status (instant from session cache)
@@ -803,53 +870,13 @@ st.sidebar.markdown("### ⚙️ Autonomous Engine")
 
 btn_col1, btn_col2 = st.sidebar.columns(2)
 if btn_col1.button("▶️ Launch", disabled=is_bot_running, use_container_width=True):
-    log_dir = ROOT / "logs"
-    log_dir.mkdir(parents=True, exist_ok=True)
-    log_file = log_dir / "synthetic_bot.log"
-    log_out = open(log_file, "a", encoding="utf-8")
-
-    cmd = [sys.executable, str(ROOT / "synthetic_bot.py"), "--run"]
-    proc = subprocess.Popen(
-        cmd,
-        cwd=str(ROOT),
-        creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == "win32" else 0,
-        stdout=log_out,
-        stderr=log_out,
-    )
-    pid_file = ROOT / "data" / "synthetic_bot.pid"
-    pid_file.parent.mkdir(parents=True, exist_ok=True)
-    pid_file.write_text(str(proc.pid), encoding="utf-8")
-    st.cache_data.clear()
-    st.sidebar.success(f"Autonomous engine started! (PID {proc.pid})")
+    new_pid = launch_autonomous_bot()
+    st.sidebar.success(f"Autonomous engine started! (PID {new_pid})")
     time.sleep(1)
     st.rerun()
 
 if btn_col2.button("⏹️ Kill", disabled=not is_bot_running, use_container_width=True):
-    pid_file = ROOT / "data" / "synthetic_bot.pid"
-    killed = False
-    if pid_file.exists():
-        try:
-            pid = int(pid_file.read_text(encoding="utf-8").strip())
-            p = psutil.Process(pid)
-            p.terminate()
-            try:
-                p.wait(timeout=2)
-            except Exception:
-                p.kill()
-            killed = True
-        except Exception:
-            pass
-        pid_file.unlink(missing_ok=True)
-    if bot_proc and not killed:
-        try:
-            bot_proc.terminate()
-            bot_proc.wait(timeout=2)
-        except Exception:
-            try:
-                bot_proc.kill()
-            except Exception:
-                pass
-    st.cache_data.clear()
+    kill_autonomous_bot()
     st.sidebar.warning("Autonomous engine terminated.")
     time.sleep(1)
     st.rerun()
@@ -925,13 +952,26 @@ with tabs[0]:
     else:
         feed_badge = "⚡ QUANT MATRIX STREAM"
 
-    # ── Top Bar: Quick Sync & Market Info ──
-    sync_c1, sync_c2 = st.columns([1, 4])
+    # ── Top Bar: Quick Sync, Direct Engine Control & Market Info ──
+    sync_c1, sync_c2, sync_c3 = st.columns([2, 1, 1])
     with sync_c1:
-        if st.button("🔄 Sync Live Stream", key="sync_now_btn", type="primary", use_container_width=True):
-            st.rerun()
+        st.caption(f"**{selected_symbol}** · {selected_tf} · {feed_badge} · {len(market_df)} Live Bars · Synced: {datetime.now(timezone.utc).strftime('%H:%M:%S UTC')}")
     with sync_c2:
-        st.caption(f"**{selected_symbol}** · {selected_tf} Resolution · {feed_badge} · {len(market_df)} Live Bars · Synced: {datetime.now(timezone.utc).strftime('%H:%M:%S UTC')}")
+        if st.button("🔄 Sync Stream", key="sync_now_btn", type="primary", use_container_width=True):
+            st.rerun()
+    with sync_c3:
+        if is_bot_running:
+            if st.button("⏹️ Stop Engine", key="stop_engine_top_btn", type="secondary", use_container_width=True):
+                kill_autonomous_bot()
+                st.warning("Autonomous engine stopped.")
+                time.sleep(1)
+                st.rerun()
+        else:
+            if st.button("▶️ Launch Engine", key="launch_engine_top_btn", type="primary", use_container_width=True):
+                launch_autonomous_bot()
+                st.success("24/7 Autonomous engine launched!")
+                time.sleep(1)
+                st.rerun()
 
     # ── Quick Market Hop (2 rows x 3 columns) ──
     st.markdown('<div style="font-size:11px; text-transform:uppercase; letter-spacing:1px; color:#7d8590; margin-top:4px; margin-bottom:8px; font-weight:700;">⚡ Quick Market Hop</div>', unsafe_allow_html=True)
@@ -1474,12 +1514,21 @@ with tabs[5]:
     st.subheader("📜 Autonomous Engine Logs")
     log_file = ROOT / "logs" / "synthetic_bot.log"
 
-    lc1, lc2 = st.columns([3, 1])
+    lc1, lc2, lc3 = st.columns([2, 1, 1])
     search_query = lc1.text_input("Filter", placeholder="e.g. SNIPE, ORDER, ERROR, Volatility 75...")
     n_lines_to_show = lc2.slider("Lines", min_value=20, max_value=300, value=80, step=20)
+    with lc3:
+        st.write("")
+        if st.button("🔄 Refresh Logs", key="refresh_logs_btn", use_container_width=True):
+            st.rerun()
 
-    if not log_file.exists():
-        st.info(f"Log file not found: `{log_file}`. Start the bot to begin logging.")
+    if not is_bot_running or not log_file.exists():
+        st.warning("Autonomous Engine is currently STANDBY. Click below to launch 24/7 autonomous surveillance across all 14 markets.")
+        if st.button("▶️ Launch 24/7 Autonomous Engine Now", key="launch_from_logs_btn", type="primary", use_container_width=True):
+            new_pid = launch_autonomous_bot()
+            st.success(f"Autonomous engine launched (PID {new_pid})! Logs will stream in 2 seconds.")
+            time.sleep(2)
+            st.rerun()
     else:
         try:
             raw_lines = log_file.read_text(encoding="utf-8", errors="replace").splitlines()
@@ -1488,7 +1537,7 @@ with tabs[5]:
                 tail_lines = [l for l in tail_lines if search_query.lower() in l.lower()]
 
             st.markdown(f'<div class="log-container">{"<br>".join(tail_lines) if tail_lines else "(no matching entries)"}</div>', unsafe_allow_html=True)
-            st.caption(f"Showing {len(tail_lines)} lines from `{log_file}`")
+            st.caption(f"Showing {len(tail_lines)} lines from `{log_file}` · Autonomous Engine Active (PID {bot_pid})")
         except Exception as log_exc:
             st.error(f"Error reading logs: {log_exc}")
 

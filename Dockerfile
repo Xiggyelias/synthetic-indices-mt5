@@ -28,7 +28,8 @@ RUN pip install --no-cache-dir --upgrade pip && \
 COPY . /app
 
 # Create data and log directories with proper permissions
-RUN mkdir -p /app/data /app/logs /app/config
+RUN mkdir -p /app/data /app/logs /app/config && \
+    chmod +x /app/entrypoint.sh
 
 # Expose default Streamlit port
 EXPOSE 8501
@@ -37,5 +38,6 @@ EXPOSE 8501
 HEALTHCHECK --interval=30s --timeout=10s --start-period=15s --retries=3 \
     CMD curl -f http://localhost:${PORT:-8501}/_stcore/health || exit 1
 
-# Launch with dynamic port binding for Dokploy / Cloud reverse proxies
-CMD ["sh", "-c", "streamlit run dashboard.py --server.port=${PORT:-8501} --server.address=0.0.0.0 --server.headless=true --browser.gatherUsageStats=false"]
+# Launch 24/7 autonomous bot and Streamlit dashboard
+ENTRYPOINT ["/app/entrypoint.sh"]
+
