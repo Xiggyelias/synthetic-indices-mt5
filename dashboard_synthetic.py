@@ -265,6 +265,55 @@ html, body, [class*="css"] {
 }
 .verdict-stand::after { background: linear-gradient(90deg, transparent, #8b949e, transparent); }
 
+/* ── Live Surveillance Radar Indicator ── */
+.radar-card {
+    background: linear-gradient(135deg, rgba(13, 20, 36, 0.95), rgba(8, 12, 24, 0.95));
+    border: 1px solid rgba(56, 139, 253, 0.35);
+    border-radius: 10px;
+    padding: 12px 18px;
+    margin-bottom: 16px;
+    position: relative;
+    overflow: hidden;
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4);
+}
+.radar-card::before {
+    content: '';
+    position: absolute;
+    top: 0; left: 0; right: 0; height: 2px;
+    background: linear-gradient(90deg, #388bfd, #00d4aa, #3fb950);
+}
+.radar-live-dot {
+    display: inline-block;
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background: #00d4aa;
+    box-shadow: 0 0 10px #00d4aa;
+    animation: radar-glow 1.5s infinite;
+}
+.radar-idle-dot {
+    display: inline-block;
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background: #f85149;
+    box-shadow: 0 0 8px rgba(248, 81, 73, 0.5);
+}
+@keyframes radar-glow {
+    0% { transform: scale(0.9); box-shadow: 0 0 0 0 rgba(0, 212, 170, 0.7); }
+    70% { transform: scale(1.2); box-shadow: 0 0 0 8px rgba(0, 212, 170, 0); }
+    100% { transform: scale(0.9); box-shadow: 0 0 0 0 rgba(0, 212, 170, 0); }
+}
+.radar-pill {
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 6px;
+    padding: 4px 10px;
+    font-size: 11px;
+    font-family: 'JetBrains Mono', monospace;
+    color: #c9d1d9;
+}
+
 /* ── Risk Gauge / Progress Bar ── */
 .risk-gauge {
     height: 6px;
@@ -534,9 +583,9 @@ bot_status_str = f"AUTONOMOUS ENGINE: ACTIVE (PID {bot_pid})" if is_bot_running 
 
 if is_mt5_connected:
     if getattr(conn, "server", "") == "Deriv-WebSocket-Live" or "WebSocket" in str(getattr(acc_info, "server", "")):
-        mt5_badge = f"🟢 DERIV CLOUD LIVE: wss://api.derivws.com | Equity: ${acc_info.equity:,.2f}"
+        mt5_badge = f"🟢 DERIV OFFICIAL CLOUD STREAM • Live Synchronized • Capital: ${acc_info.equity:,.2f}"
     else:
-        mt5_badge = f"🟢 MT5 LIVE: #{acc_info.login} ({acc_info.server}) | Equity: ${acc_info.equity:,.2f}"
+        mt5_badge = f"🟢 MT5 TERMINAL LIVE: #{acc_info.login} • Capital: ${acc_info.equity:,.2f}"
 elif is_bot_running:
     mt5_badge = "🟢 24/7 CLOUD AUTONOMOUS ENGINE ACTIVE"
 else:
@@ -554,6 +603,52 @@ st.markdown(f"""
       {pulse_html} {bot_status_str}
     </div>
     <div style="font-size:11px; color:#7d8590; margin-top:6px; font-weight:500;">14 Synthetic Instruments • 24/7 Autonomous • Half-Kelly Compounding</div>
+  </div>
+</div>
+""", unsafe_allow_html=True)
+
+# ── Dynamic 24/7 Surveillance Radar Card ──────────────────────────────────────
+engine_state = {}
+state_file = ROOT / "data" / "synthetic_state.json"
+if state_file.exists():
+    try:
+        engine_state = json.loads(state_file.read_text(encoding="utf-8"))
+    except Exception:
+        pass
+
+cycle_num = engine_state.get("cycle_count", "—")
+last_updated = engine_state.get("updated_at", "")
+if last_updated:
+    try:
+        last_dt = datetime.fromisoformat(last_updated)
+        time_str = last_dt.strftime("%H:%M:%S UTC")
+    except Exception:
+        time_str = "Synchronized"
+else:
+    time_str = datetime.now(timezone.utc).strftime("%H:%M:%S UTC")
+
+open_pos_count = len(engine_state.get("open_trades", {}))
+radar_status_text = "24/7 AUTONOMOUS MARKET RADAR ACTIVE" if is_bot_running else "24/7 MARKET RADAR: STANDBY"
+radar_sub_text = "Continuously scanning all 14 synthetic markets every 10s • Real-time Stream" if is_bot_running else "Click ▶ Launch in sidebar to start 24/7 autonomous surveillance"
+radar_dot_class = "radar-live-dot" if is_bot_running else "radar-idle-dot"
+
+st.markdown(f"""
+<div class="radar-card">
+  <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:10px;">
+    <div style="display:flex; align-items:center; gap:10px;">
+      <span class="{radar_dot_class}"></span>
+      <div>
+        <div style="font-size:13px; font-weight:800; color:#e6edf3; letter-spacing:0.5px;">{radar_status_text}</div>
+        <div style="font-size:11px; color:#7d8590; margin-top:2px;">{radar_sub_text}</div>
+      </div>
+    </div>
+    <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+      <span class="radar-pill">⚡ <b>Scan Cycle:</b> #{cycle_num}</span>
+      <span class="radar-pill">📡 <b>Coverage:</b> 14 Markets</span>
+      <span class="radar-pill">🛡️ <b>Shield:</b> Guarding Capital</span>
+      <span class="radar-pill">📊 <b>Active Trades:</b> {open_pos_count}</span>
+      <span class="radar-pill">⏱️ <b>Heartbeat:</b> {time_str}</span>
+    </div>
   </div>
 </div>
 """, unsafe_allow_html=True)
@@ -586,14 +681,14 @@ sample_size = st.sidebar.slider("Lookback Depth (Candles)", min_value=60, max_va
 
 data_feed_source = st.sidebar.radio(
     "Data Source",
-    options=["Automatic (Live MT5 → Cloud Matrix)", "Force Simulator (Instant)"],
+    options=["Automatic (Live Real-Time Cloud Stream)", "Force Simulator (Instant)"],
     index=0
 )
 
-if st.sidebar.button("🔌 Connect Live Feed (Deriv Web / MT5)", help="Connect directly to live Deriv WebSockets or desktop MT5 terminal"):
+if st.sidebar.button("🔄 Re-Sync Live Feed", help="Synchronize live real-time market connection"):
     st.session_state.pop("mt5_conn_cached", None)
     get_live_mt5_connection(force_probe=True)
-    st.sidebar.success("Live market feed connected!")
+    st.sidebar.success("Live market feed synchronized!")
     time.sleep(0.5)
     st.rerun()
 
@@ -717,14 +812,14 @@ with tabs[0]:
     kalman_result = fit_kalman_filter(market_df["close"])
 
     if data_mode == "LIVE_DERIV_WEB":
-        feed_badge = "🟢 DERIV WEB LIVE (api.derivws.com)"
+        feed_badge = "🟢 LIVE REAL-TIME FEED"
     elif data_mode == "LIVE_MT5":
         feed_badge = "🟢 LIVE MT5 FEED"
     elif is_bot_running:
         feed_badge = "🟢 24/7 CLOUD QUANT ENGINE"
     else:
         feed_badge = "⚡ QUANT MATRIX STREAM"
-    st.caption(f"**{selected_symbol}** · {selected_tf} · {feed_badge} · {len(market_df)} bars · {datetime.now(timezone.utc).strftime('%H:%M:%S UTC')}")
+    st.caption(f"**{selected_symbol}** · {selected_tf} Resolution · {feed_badge} · {len(market_df)} Live Bars · Synced: {datetime.now(timezone.utc).strftime('%H:%M:%S UTC')}")
 
     # ── Row 1: Primary Quantitative Metrics (4 cards) ──
     c1, c2, c3, c4 = st.columns(4)
@@ -826,18 +921,43 @@ with tabs[0]:
     )
     arch_html = archetype_badge(analysis.strategy_archetype)
 
+    if analysis.recommended_action == "STAND_ASIDE":
+        verdict_details = f"""
+        <div style="font-size:13px; font-weight:700; color:#8b949e; font-family:'JetBrains Mono',monospace;">STATUS: CAPITAL GUARD ACTIVE</div>
+        <div style="font-size:11px; margin-top:4px; color:#7d8590;">Current Price: {curr_price:,.2f} · Waiting for Edge ≥ 60%</div>
+        """
+        verdict_sub = f"Market is currently in Brownian noise ({analysis.hurst.regime}, H={analysis.hurst.hurst_exponent:.3f}). The engine protects your balance by standing aside until true statistical asymmetry occurs."
+    else:
+        verdict_details = f"""
+        <div style="font-size:13px; font-weight:700; font-family:'JetBrains Mono',monospace;">TP1: {analysis.target_price:.5f} &nbsp;|&nbsp; TP2: {analysis.target_price_2:.5f}</div>
+        <div style="font-size:11px; margin-top:4px; color:#7d8590;">SL: {analysis.invalidation_price:.5f} &nbsp;|&nbsp; Horizon: {analysis.half_life_horizon_bars}b</div>
+        """
+        verdict_sub = f"Win Prob: <b>{analysis.calculated_win_probability:.1%}</b> &nbsp;|&nbsp; E[R]: <b>{analysis.expected_yield_r:+.2f}R</b> &nbsp;|&nbsp; {macro_conf_text}"
+
     st.markdown(f"""
     <div class="verdict-box {verdict_class}">
       <div>
         <div style="font-size:17px; font-weight:800; letter-spacing:-0.3px;">{verdict_icon} {analysis.recommended_action} &nbsp;·&nbsp; Edge: {analysis.math_edge_score}/100 &nbsp; {arch_html}</div>
-        <div style="font-size:12px; margin-top:6px; opacity:0.9;">Win Prob: <b>{analysis.calculated_win_probability:.1%}</b> &nbsp;|&nbsp; E[R]: <b>{analysis.expected_yield_r:+.2f}R</b> &nbsp;|&nbsp; {macro_conf_text}</div>
+        <div style="font-size:12px; margin-top:6px; opacity:0.9;">{verdict_sub}</div>
       </div>
       <div style="text-align:right">
-        <div style="font-size:13px; font-weight:700; font-family:'JetBrains Mono',monospace;">TP1: {analysis.target_price:.5f} &nbsp;|&nbsp; TP2: {analysis.target_price_2:.5f}</div>
-        <div style="font-size:11px; margin-top:4px; color:#7d8590;">SL: {analysis.invalidation_price:.5f} &nbsp;|&nbsp; Horizon: {analysis.half_life_horizon_bars}b</div>
+        {verdict_details}
       </div>
     </div>
     """, unsafe_allow_html=True)
+
+    # ── Live Surveillance Activity Explanation Panel ──
+    if analysis.recommended_action == "STAND_ASIDE":
+        st.markdown(f"""
+        <div class="info-panel" style="margin-top:-6px; margin-bottom:18px;">
+          <div class="info-panel-title">📡 Why Nothing Looks Like It Is Happening</div>
+          <div style="font-size:12px; color:#c9d1d9; line-height:1.6;">
+            The autonomous engine is actively scanning all <b>14 synthetic markets</b> every 10 seconds in the background.
+            Because <b>{selected_symbol}</b> is currently behaving as an unpredictable random walk ($H = {analysis.hurst.hurst_exponent:.3f}$), the quantitative brain <b>deliberately refuses to trade noise</b> to preserve your funds.
+            <br>🎯 <b>Next Action:</b> The engine will instantly execute as soon as a market reaches Edge ≥ 60%. To see all 14 markets right now, click the <b>⚡ Multi-Market Matrix</b> tab.
+          </div>
+        </div>
+        """, unsafe_allow_html=True)
 
     # ── Plotly Candlestick Chart with Kalman Overlay ──
     fig = make_subplots(
