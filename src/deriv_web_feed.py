@@ -34,12 +34,25 @@ DERIV_SYMBOL_MAP: Dict[str, str] = {
     "Volatility 10 (1s) Index": "1HZ10V",
     "Crash 1000 Index": "CRASH1000",
     "Crash 500 Index": "CRASH500",
-    "Crash 300 Index": "CRASH300",
+    "Crash 300 Index": "CRASH300N",
     "Boom 1000 Index": "BOOM1000",
     "Boom 500 Index": "BOOM500",
-    "Boom 300 Index": "BOOM300",
+    "Boom 300 Index": "BOOM300N",
     "Step Index": "stpRNG",
 }
+
+# Legacy code mapping aliases
+DERIV_CODE_ALIASES: Dict[str, str] = {
+    "CRASH300": "CRASH300N",
+    "BOOM300": "BOOM300N",
+    "CRASH_1000": "CRASH1000",
+    "CRASH_500": "CRASH500",
+    "CRASH_300": "CRASH300N",
+    "BOOM_1000": "BOOM1000",
+    "BOOM_500": "BOOM500",
+    "BOOM_300": "BOOM300N",
+}
+
 
 # Reverse lookup: code -> canonical human name
 CODE_TO_NAME: Dict[str, str] = {v: k for k, v in DERIV_SYMBOL_MAP.items()}
@@ -69,6 +82,9 @@ def normalize_deriv_symbol(symbol: str) -> str:
     if not symbol:
         return "R_75"
     s = symbol.strip()
+    s_upper = s.upper()
+    if s_upper in DERIV_CODE_ALIASES:
+        return DERIV_CODE_ALIASES[s_upper]
     if s in DERIV_SYMBOL_MAP.values():
         return s
     if s in DERIV_SYMBOL_MAP:
@@ -173,6 +189,49 @@ class DerivWebAccountInfo:
     leverage: int = 100
 
 
+_DERIV_ACCOUNT_CACHE: Dict[str, Any] = {"time": 0.0, "data": None}
+
+
+def fetch_deriv_cloud_accounts() -> Optional[List[Dict[str, Any]]]:
+    """Fetch live Deriv account details using official options/accounts REST endpoint."""
+    import os
+    import time
+    import urllib.request
+
+    now = time.time()
+    if now - _DERIV_ACCOUNT_CACHE["time"] < 15.0 and _DERIV_ACCOUNT_CACHE["data"]:
+        return _DERIV_ACCOUNT_CACHE["data"]
+
+    token = os.getenv("DERIV_API_TOKEN", "")
+    app_id = os.getenv("DERIV_APP_ID", "")
+    if not token or token == "YOUR_DERIV_API_TOKEN":
+        return None
+
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+    }
+    if app_id:
+        headers["Deriv-App-ID"] = app_id
+
+    try:
+        req = urllib.request.Request(
+            "https://api.derivws.com/trading/v1/options/accounts",
+            headers=headers,
+        )
+        with urllib.request.urlopen(req, timeout=3.5) as resp:
+            body = json.loads(resp.read().decode("utf-8"))
+            accs = body.get("data", [])
+            if accs:
+                _DERIV_ACCOUNT_CACHE["time"] = now
+                _DERIV_ACCOUNT_CACHE["data"] = accs
+                return accs
+    except Exception as exc:
+        logger.debug("Deriv account fetch error: %s", exc)
+
+    return _DERIV_ACCOUNT_CACHE["data"]
+
+
 class DerivWebConnection:
     """
     Drop-in web replacement for MT5Connection on Linux/Dokploy/Cloud environments.
@@ -215,19 +274,36 @@ class DerivWebConnection:
     def get_account_info(self) -> DerivWebAccountInfo:
         import os
         eq = 10000.0
+        bal = 10000.0
         state_file = self.root_dir / "data" / "synthetic_state.json"
         if state_file.exists():
             try:
                 data = json.loads(state_file.read_text(encoding="utf-8"))
                 eq = float(data.get("equity", 10000.0))
+                bal = float(data.get("balance", 10000.0))
             except Exception:
                 pass
-        
-        token = os.getenv("DERIV_API_TOKEN", "")
-        if token and token != "YOUR_DERIV_API_TOKEN":
-            masked = f"{token[:8]}...{token[-4:]}" if len(token) > 12 else "Active"
-            login_id = f"PAT #{masked}"
-        else:
-            login_id = "Deriv-Public-Feed"
 
-        return DerivWebAccountInfo(login=login_id, equity=eq, balance=eq, margin_free=eq)
+        accounts = fetch_deriv_cloud_accounts()
+        login_id = "Deriv-Public-Feed"
+        if accounts:
+            # Prefer active real account if funded, else demo account
+            real_acc = next((a for a in accounts if a.get("account_type") == "real" and float(a.get("balance", 0)) > 0), None)
+            demo_acc = next((a for a in accounts if a.get("account_type") == "demo"), None)
+            target = real_acc or demo_acc or accounts[0]
+            acc_id = target.get("account_id", "")
+            acc_type = target.get("account_type", "").upper()
+            login_id = f"{acc_id} ({acc_type})"
+            try:
+                raw_bal = float(target.get("balance", eq))
+                if not state_file.exists():
+                    bal = eq = raw_bal
+            except Exception:
+                pass
+        else:
+            token = os.getenv("DERIV_API_TOKEN", "")
+            if token and token != "YOUR_DERIV_API_TOKEN":
+                masked = f"{token[:8]}...{token[-4:]}" if len(token) > 12 else "Active"
+                login_id = f"PAT #{masked}"
+
+        return DerivWebAccountInfo(login=login_id, equity=eq, balance=bal, margin_free=eq)

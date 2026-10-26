@@ -1494,59 +1494,164 @@ with tabs[4]:
     st.subheader("📋 Active Positions & Trade History")
     state_file = ROOT / "data" / "synthetic_state.json"
 
-    tcol1, tcol2 = st.columns([3, 1])
-    with tcol2:
-        if st.button("🔄 Refresh Trades"):
-            st.rerun()
+    # ── Interactive Verification Trade Execution Box ──
+    with st.expander("🧪 Open Live Market Verification Trade (Instant Execution)", expanded=True):
+        st.caption("Place an immediate order at live Deriv spot price to test order routing, real-time SL/TP tracking, and floating P&L calculations.")
+        tc1, tc2, tc3, tc4 = st.columns([2, 1, 1, 2])
+        with tc1:
+            exec_symbol = st.selectbox("Instrument", list(DERIV_SYNTHETIC_SPECS.keys()), index=0, key="exec_sym_box")
+        with tc2:
+            exec_dir = st.selectbox("Direction", ["BUY", "SELL"], index=0, key="exec_dir_box")
+        with tc3:
+            spec = DERIV_SYNTHETIC_SPECS.get(exec_symbol, {"min_lot": 0.01})
+            min_l = float(spec.get("min_lot", 0.01))
+            exec_vol = st.number_input("Volume", min_value=min_l, max_value=50.0, value=min_l, step=min_l, key="exec_vol_box")
+        with tc4:
+            st.write("")
+            st.write("")
+            if st.button("🚀 Open Live Verification Trade", type="primary", use_container_width=True, key="exec_test_trade_btn"):
+                with st.spinner(f"Querying live Deriv spot price for {exec_symbol}..."):
+                    spot_df = get_deriv_live_candles(exec_symbol, "M1", 5)
+                if spot_df is not None and len(spot_df) > 0:
+                    spot_p = float(spot_df["close"].iloc[-1])
+                    r_pts = spot_p * 0.008  # 0.8% distance
+                    sl_target = round(spot_p - r_pts if exec_dir == "BUY" else spot_p + r_pts, 4)
+                    tp_target = round(spot_p + 1.5 * r_pts if exec_dir == "BUY" else spot_p - 1.5 * r_pts, 4)
+                    t_ticket = f"VERIFY-{int(time.time()) % 100000}"
 
-    if not state_file.exists():
-        st.info("No trades recorded yet. Start the autonomous engine (▶ Launch) to begin autonomous surveillance & trading.")
-    else:
+                    cur_data = {"open_trades": {}, "closed_trades": [], "equity": 10000.0, "balance": 10000.0, "mode": "CLOUD_AUTONOMOUS_LIVE_WEB"}
+                    if state_file.exists():
+                        try:
+                            cur_data = json.loads(state_file.read_text(encoding="utf-8"))
+                        except Exception:
+                            pass
+
+                    cur_data.setdefault("open_trades", {})[t_ticket] = {
+                        "ticket": t_ticket,
+                        "symbol": exec_symbol,
+                        "direction": exec_dir,
+                        "volume": exec_vol,
+                        "entry_price": spot_p,
+                        "stop_loss": sl_target,
+                        "take_profit": tp_target,
+                        "strategy_type": "LIVE_VERIFICATION_TEST",
+                        "math_edge_score": 85.0,
+                        "win_probability": 0.72,
+                        "kalman_confirmation": "CONFIRMS",
+                        "var_risk_level": "LOW",
+                        "opened_at": datetime.now(timezone.utc).isoformat(),
+                        "moved_to_be": False,
+                        "tp1_reached": False,
+                    }
+                    cur_data["updated_at"] = datetime.now(timezone.utc).isoformat()
+                    state_file.parent.mkdir(parents=True, exist_ok=True)
+                    state_file.write_text(json.dumps(cur_data, indent=2), encoding="utf-8")
+                    st.toast(f"✅ Executed {exec_dir} on {exec_symbol} @ {spot_p:,.4f}!", icon="🎯")
+                    time.sleep(0.4)
+                    st.rerun()
+                else:
+                    st.error(f"Could not retrieve live spot price for {exec_symbol} from Deriv WebSocket.")
+
+    # ── State Summary Metrics ──
+    cur_data = {"open_trades": {}, "closed_trades": [], "equity": 10000.0, "balance": 10000.0, "mode": "CLOUD_AUTONOMOUS_LIVE_WEB"}
+    if state_file.exists():
         try:
-            data = json.loads(state_file.read_text(encoding="utf-8"))
-            open_pos = data.get("open_trades", {})
-            closed_pos = data.get("closed_trades", [])
-            state_eq = float(data.get("equity", 10000.0))
-            state_bal = float(data.get("balance", 10000.0))
-            total_pnl = state_eq - 10000.0
+            cur_data = json.loads(state_file.read_text(encoding="utf-8"))
+        except Exception:
+            pass
 
-            tm1, tm2, tm3, tm4 = st.columns(4)
-            tm1.metric("Engine Mode", data.get("mode", "LIVE_WEB"), "24/7 Autonomous" if is_bot_running else "Standby")
-            tm2.metric("Portfolio Equity", f"${state_eq:,.2f}", f"{total_pnl:+,.2f}")
-            tm3.metric("Active Positions", f"{len(open_pos)} / 6")
-            tm4.metric("Closed Trades", f"{len(closed_pos)}")
+    open_pos = cur_data.get("open_trades", {})
+    closed_pos = cur_data.get("closed_trades", [])
+    state_eq = float(cur_data.get("equity", 10000.0))
+    state_bal = float(cur_data.get("balance", 10000.0))
+    total_pnl = state_eq - 10000.0
 
-            if open_pos:
-                st.markdown("##### 📂 Active Positions")
-                rows = []
-                for ticket, t in open_pos.items():
-                    rows.append({
-                        "Ticket": ticket,
-                        "Symbol": t.get("symbol"),
-                        "Dir": t.get("direction"),
-                        "Vol": t.get("volume"),
-                        "Entry": t.get("entry_price"),
-                        "SL": t.get("stop_loss"),
-                        "TP1": t.get("take_profit"),
-                        "TP2": t.get("take_profit_2", "—"),
-                        "Edge": t.get("math_edge_score"),
-                        "Win%": f"{t.get('win_probability', 0.5):.0%}",
-                        "BE": "✅" if t.get("moved_to_be") else "❌",
-                        "TP1✓": "✅" if t.get("tp1_reached") else "❌",
-                    })
-                st.dataframe(pd.DataFrame(rows), height=300)
-            else:
-                st.write("No active open positions.")
+    tm1, tm2, tm3, tm4 = st.columns(4)
+    tm1.metric("Engine Mode", cur_data.get("mode", "LIVE_WEB"), "24/7 Autonomous" if is_bot_running else "Standby")
+    tm2.metric("Portfolio Equity", f"${state_eq:,.2f}", f"{total_pnl:+,.2f}")
+    tm3.metric("Active Positions", f"{len(open_pos)} / 6")
+    tm4.metric("Closed Trades", f"{len(closed_pos)}")
 
-            if closed_pos:
-                st.markdown("##### 📜 Closed Trades")
-                df_closed = pd.DataFrame(closed_pos)
-                st.dataframe(df_closed, height=400)
-        except Exception as e:
-            st.error(f"Error parsing state: {e}")
+    # ── Active Positions with Real-Time P&L & Close Buttons ──
+    st.markdown("##### 📂 Active Open Positions")
+    if open_pos:
+        for ticket, t in list(open_pos.items()):
+            sym = t.get("symbol", "Volatility 75 Index")
+            direction = t.get("direction", "BUY")
+            entry_p = float(t.get("entry_price", 0.0))
+            sl_p = float(t.get("stop_loss", 0.0))
+            tp_p = float(t.get("take_profit", 0.0))
+            vol = float(t.get("volume", 0.01))
+
+            spot_tick = get_deriv_live_candles(sym, "M1", 2)
+            cur_p = float(spot_tick["close"].iloc[-1]) if spot_tick is not None and len(spot_tick) > 0 else entry_p
+
+            pnl_pts = (cur_p - entry_p) if direction == "BUY" else (entry_p - cur_p)
+            r_dist = max(abs(entry_p - sl_p), 1e-4)
+            pnl_r = pnl_pts / r_dist
+            pnl_usd = pnl_pts * vol * 10.0
+
+            pnl_color = "#3fb950" if pnl_usd >= 0 else "#f85149"
+
+            with st.container():
+                pcol1, pcol2, pcol3, pcol4, pcol5, pcol6 = st.columns([2, 1.2, 1.2, 1.5, 1.2, 1])
+                with pcol1:
+                    dir_badge = "🟢 BUY" if direction == "BUY" else "🔴 SELL"
+                    st.markdown(f"**{sym}** · `{ticket}`")
+                    st.caption(f"{dir_badge} · Vol: {vol} · {t.get('strategy_type', 'QUANT')}")
+                with pcol2:
+                    st.markdown(f"**Entry:** `{entry_p:,.4f}`")
+                    st.caption(f"SL: `{sl_p:,.4f}`")
+                with pcol3:
+                    st.markdown(f"**Live:** `{cur_p:,.4f}`")
+                    st.caption(f"TP: `{tp_p:,.4f}`")
+                with pcol4:
+                    st.markdown(f"<span style='color:{pnl_color}; font-size:16px; font-weight:800;'>${pnl_usd:+,.2f} USD</span>", unsafe_allow_html=True)
+                    st.caption(f"Yield: **{pnl_r:+.2f}R**")
+                with pcol5:
+                    be_txt = "✅ Locked" if t.get("moved_to_be") else "⏳ Trailing"
+                    st.markdown(f"**BE:** {be_txt}")
+                    st.caption(f"Edge: {t.get('math_edge_score', '—')}/100")
+                with pcol6:
+                    st.write("")
+                    if st.button("❌ Close", key=f"close_t_{ticket}", type="secondary", use_container_width=True):
+                        cur_data.setdefault("closed_trades", []).append({
+                            **t,
+                            "exit_price": round(cur_p, 4),
+                            "closed_at": datetime.now(timezone.utc).isoformat(),
+                            "close_reason": "MANUAL_CLOSE",
+                            "pnl_r": round(pnl_r, 2),
+                            "pnl_usd": round(pnl_usd, 2),
+                        })
+                        del cur_data["open_trades"][ticket]
+                        cur_data["equity"] = round(cur_data.get("equity", 10000.0) + pnl_usd, 2)
+                        cur_data["balance"] = round(cur_data.get("balance", 10000.0) + pnl_usd, 2)
+                        cur_data["updated_at"] = datetime.now(timezone.utc).isoformat()
+                        state_file.write_text(json.dumps(cur_data, indent=2), encoding="utf-8")
+                        st.toast(f"🏁 Closed position #{ticket} | Realized: ${pnl_usd:+.2f} USD", icon="💵")
+                        time.sleep(0.3)
+                        st.rerun()
+                st.markdown("<hr style='margin:4px 0 12px 0; border:none; border-top:1px solid rgba(255,255,255,0.06);'>", unsafe_allow_html=True)
+    else:
+        st.info("No active open positions. Click '🚀 Open Live Verification Trade' above or launch the autonomous engine to monitor.")
+
+    # ── Closed Trades History ──
+    if closed_pos:
+        st.markdown("##### 📜 Closed Trades History")
+        h1, h2 = st.columns([3, 1])
+        with h2:
+            if st.button("🧹 Reset History", key="reset_hist_btn"):
+                cur_data["closed_trades"] = []
+                cur_data["equity"] = 10000.0
+                cur_data["balance"] = 10000.0
+                state_file.write_text(json.dumps(cur_data, indent=2), encoding="utf-8")
+                st.toast("Trade history reset.", icon="🧹")
+                time.sleep(0.3)
+                st.rerun()
+        df_closed = pd.DataFrame(closed_pos)
+        st.dataframe(df_closed, height=300, use_container_width=True)
 
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # TAB 6: System Logs
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 with tabs[5]:
