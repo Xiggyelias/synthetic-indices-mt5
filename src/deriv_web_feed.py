@@ -213,6 +213,7 @@ class DerivWebConnection:
         return None
 
     def get_account_info(self) -> DerivWebAccountInfo:
+        import os
         eq = 10000.0
         state_file = self.root_dir / "data" / "synthetic_state.json"
         if state_file.exists():
@@ -221,4 +222,12 @@ class DerivWebConnection:
                 eq = float(data.get("equity", 10000.0))
             except Exception:
                 pass
-        return DerivWebAccountInfo(equity=eq, balance=eq, margin_free=eq)
+        
+        token = os.getenv("DERIV_API_TOKEN", "")
+        if token and token != "YOUR_DERIV_API_TOKEN":
+            masked = f"{token[:8]}...{token[-4:]}" if len(token) > 12 else "Active"
+            login_id = f"PAT #{masked}"
+        else:
+            login_id = "Deriv-Public-Feed"
+
+        return DerivWebAccountInfo(login=login_id, equity=eq, balance=eq, margin_free=eq)
