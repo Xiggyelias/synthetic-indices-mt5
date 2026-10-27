@@ -1609,13 +1609,59 @@ with tabs[4]:
     tm3.metric("Active Positions", f"{len(open_pos)} / 6")
     tm4.metric("Closed Trades", f"{len(closed_pos)}")
 
-    # ── Active Positions with Real-Time P&L & Close Buttons ──
-    col_pos_hdr, col_pos_act = st.columns([3, 1])
-    with col_pos_hdr:
-        st.markdown("##### 📂 Active Open Positions")
-    with col_pos_act:
-        if len(open_pos) > 1:
-            if st.button("🚨 Emergency Close All", key="close_all_pos_btn", type="secondary", use_container_width=True):
+    # ── Active Positions Spreadsheet Matrix ──
+    st.markdown("##### 📂 Active Open Positions")
+    if open_pos:
+        # Build clean spreadsheet DataFrame exactly matching user requested view
+        open_rows = []
+        for ticket, t in open_pos.items():
+            open_rows.append({
+                "symbol": t.get("symbol", "—"),
+                "direction": t.get("direction", "BUY"),
+                "volume": t.get("volume", 0.0),
+                "entry_price": round(float(t.get("entry_price", 0.0)), 4),
+                "stop_loss": round(float(t.get("stop_loss", 0.0)), 4),
+                "take_profit": round(float(t.get("take_profit", 0.0)), 4),
+                "strategy_type": t.get("strategy_type", "—"),
+                "math_edge_score": round(float(t.get("math_edge_score", 0.0)), 1),
+                "win_probability": round(float(t.get("win_probability", 0.5)), 3),
+                "kalman_confirmation": t.get("kalman_confirmation", "CONFIRMS"),
+                "var_risk_level": t.get("var_risk_level", "LOW"),
+                "opened_at": t.get("opened_at", ""),
+            })
+
+        df_open = pd.DataFrame(open_rows)
+        st.dataframe(df_open, height=280, use_container_width=True)
+
+        # ── Interactive Position Actions (Close Single / Close All) ──
+        act_col1, act_col2, act_col3 = st.columns([2.5, 1.2, 1.2])
+        with act_col1:
+            ticket_keys = list(open_pos.keys())
+            ticket_labels = [f"#{tkt} · {open_pos[tkt].get('symbol')} ({open_pos[tkt].get('direction')} {open_pos[tkt].get('volume')} lots)" for tkt in ticket_keys]
+            sel_idx = st.selectbox("Select Active Position to Close", range(len(ticket_keys)), format_func=lambda i: ticket_labels[i], key="pos_select_box")
+            target_ticket = ticket_keys[sel_idx]
+        with act_col2:
+            st.write("")
+            st.write("")
+            if st.button("❌ Close Selected", key="close_sel_pos_btn", type="secondary", use_container_width=True):
+                t_close = open_pos.get(target_ticket, {})
+                sym_c = t_close.get("symbol", "")
+                s_df = get_deriv_live_candles(sym_c, "M1", 2)
+                c_p = float(s_df["close"].iloc[-1]) if s_df is not None and len(s_df) > 0 else float(t_close.get("entry_price", 0.0))
+                e_p = float(t_close.get("entry_price", c_p))
+                d_dir = t_close.get("direction", "BUY")
+                p_pts = (c_p - e_p) if d_dir == "BUY" else (e_p - c_p)
+                r_dist = max(abs(e_p - float(t_close.get("stop_loss", e_p))), 1e-4)
+                p_usd = round(p_pts * float(t_close.get("volume", 0.01)), 2)
+                p_r = round(p_pts / r_dist, 2)
+                storage.close_trade(target_ticket, exit_price=c_p, pnl_usd=p_usd, pnl_r=p_r, close_reason="MANUAL_CLOSE")
+                st.toast(f"🏁 Closed position #{target_ticket} | Realized: ${p_usd:+.2f} USD", icon="💵")
+                time.sleep(0.3)
+                st.rerun()
+        with act_col3:
+            st.write("")
+            st.write("")
+            if st.button("🚨 Emergency Close All", key="close_all_pos_btn", type="primary", use_container_width=True):
                 closed_count = 0
                 net_pnl_all = 0.0
                 for ticket_k, t_pos in list(open_pos.items()):
@@ -1635,57 +1681,44 @@ with tabs[4]:
                 time.sleep(0.4)
                 st.rerun()
 
-    if open_pos:
-        for ticket, t in list(open_pos.items()):
-            sym = t.get("symbol", "Volatility 75 Index")
-            direction = t.get("direction", "BUY")
-            entry_p = float(t.get("entry_price", 0.0))
-            sl_p = float(t.get("stop_loss", 0.0))
-            tp_p = float(t.get("take_profit", 0.0))
-            vol = float(t.get("volume", 0.01))
+        # ── Detailed Real-Time P&L Cards (Optional Expandable) ──
+        with st.expander("🎛️ Detailed Position Cards with Live Floating P&L", expanded=False):
+            for ticket, t in list(open_pos.items()):
+                sym = t.get("symbol", "Volatility 75 Index")
+                direction = t.get("direction", "BUY")
+                entry_p = float(t.get("entry_price", 0.0))
+                sl_p = float(t.get("stop_loss", 0.0))
+                tp_p = float(t.get("take_profit", 0.0))
+                vol = float(t.get("volume", 0.01))
 
-            spot_tick = get_deriv_live_candles(sym, "M1", 2)
-            cur_p = float(spot_tick["close"].iloc[-1]) if spot_tick is not None and len(spot_tick) > 0 else entry_p
+                spot_tick = get_deriv_live_candles(sym, "M1", 2)
+                cur_p = float(spot_tick["close"].iloc[-1]) if spot_tick is not None and len(spot_tick) > 0 else entry_p
 
-            pnl_pts = (cur_p - entry_p) if direction == "BUY" else (entry_p - cur_p)
-            r_dist = max(abs(entry_p - sl_p), 1e-4)
-            pnl_r = pnl_pts / r_dist
-            pnl_usd = pnl_pts * vol
+                pnl_pts = (cur_p - entry_p) if direction == "BUY" else (entry_p - cur_p)
+                r_dist = max(abs(entry_p - sl_p), 1e-4)
+                pnl_r = pnl_pts / r_dist
+                pnl_usd = pnl_pts * vol
+                pnl_color = "#3fb950" if pnl_usd >= 0 else "#f85149"
 
-            pnl_color = "#3fb950" if pnl_usd >= 0 else "#f85149"
-
-            with st.container():
-                pcol1, pcol2, pcol3, pcol4, pcol5, pcol6 = st.columns([2, 1.2, 1.2, 1.5, 1.2, 1])
-                with pcol1:
-                    dir_badge = "🟢 BUY" if direction == "BUY" else "🔴 SELL"
-                    st.markdown(f"**{sym}** · `{ticket}`")
-                    st.caption(f"{dir_badge} · Vol: {vol} · {t.get('strategy_type', 'QUANT')}")
-                with pcol2:
-                    st.markdown(f"**Entry:** `{entry_p:,.4f}`")
-                    st.caption(f"SL: `{sl_p:,.4f}`")
-                with pcol3:
-                    st.markdown(f"**Live:** `{cur_p:,.4f}`")
-                    st.caption(f"TP: `{tp_p:,.4f}`")
-                with pcol4:
-                    st.markdown(f"<span style='color:{pnl_color}; font-size:16px; font-weight:800;'>${pnl_usd:+,.2f} USD</span>", unsafe_allow_html=True)
-                    st.caption(f"Yield: **{pnl_r:+.2f}R**")
-                with pcol5:
-                    be_txt = "✅ Locked" if t.get("moved_to_be") else "⏳ Trailing"
-                    st.markdown(f"**BE:** {be_txt}")
-                    st.caption(f"Edge: {t.get('math_edge_score', '—')}/100")
-                with pcol6:
-                    st.write("")
-                    if st.button("❌ Close", key=f"close_t_{ticket}", type="secondary", use_container_width=True):
-                        storage.close_trade(
-                            ticket=ticket,
-                            exit_price=round(cur_p, 4),
-                            pnl_usd=round(pnl_usd, 2),
-                            pnl_r=round(pnl_r, 2),
-                            close_reason="MANUAL_CLOSE",
-                        )
-                        st.toast(f"🏁 Closed position #{ticket} | Realized: ${pnl_usd:+.2f} USD", icon="💵")
-                        time.sleep(0.3)
-                        st.rerun()
+                with st.container():
+                    pcol1, pcol2, pcol3, pcol4, pcol5 = st.columns([2, 1.2, 1.2, 1.5, 1.2])
+                    with pcol1:
+                        dir_badge = "🟢 BUY" if direction == "BUY" else "🔴 SELL"
+                        st.markdown(f"**{sym}** · `{ticket}`")
+                        st.caption(f"{dir_badge} · Vol: {vol} · {t.get('strategy_type', 'QUANT')}")
+                    with pcol2:
+                        st.markdown(f"**Entry:** `{entry_p:,.4f}`")
+                        st.caption(f"SL: `{sl_p:,.4f}`")
+                    with pcol3:
+                        st.markdown(f"**Live:** `{cur_p:,.4f}`")
+                        st.caption(f"TP: `{tp_p:,.4f}`")
+                    with pcol4:
+                        st.markdown(f"<span style='color:{pnl_color}; font-size:16px; font-weight:800;'>${pnl_usd:+,.2f} USD</span>", unsafe_allow_html=True)
+                        st.caption(f"Yield: **{pnl_r:+.2f}R**")
+                    with pcol5:
+                        be_txt = "✅ Locked" if t.get("moved_to_be") else "⏳ Trailing"
+                        st.markdown(f"**BE:** {be_txt}")
+                        st.caption(f"Edge: {t.get('math_edge_score', '—')}/100")
                 st.markdown("<hr style='margin:4px 0 12px 0; border:none; border-top:1px solid rgba(255,255,255,0.06);'>", unsafe_allow_html=True)
     else:
         st.info("No active open positions. Click '🚀 Open Live Verification Trade' above or launch the autonomous engine to monitor.")
