@@ -6,16 +6,8 @@
   "active_symbols": [
     "Volatility 75 Index",
     "Volatility 75 (1s) Index",
-    "Volatility 100 Index",
-    "Volatility 100 (1s) Index",
     "Volatility 50 Index",
-    "Volatility 10 Index",
-    "Crash 1000 Index",
-    "Crash 500 Index",
-    "Crash 300 Index",
-    "Boom 1000 Index",
-    "Boom 500 Index",
-    "Boom 300 Index",
+    "Volatility 50 (1s) Index",
     "Step Index"
   ],
   "timeframe": "M5",
@@ -24,7 +16,7 @@
   "fast_poll_seconds": 4,
   "slow_poll_seconds": 15,
   "magic_number": 20260909,
-  "min_math_edge": 52.0,
+  "min_math_edge": 60.0,
   "calculative_brain": {
     "hurst_anti_persistent_threshold": 0.46,
     "hurst_persistent_threshold": 0.54,

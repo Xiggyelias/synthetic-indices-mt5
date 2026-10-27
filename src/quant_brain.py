@@ -954,21 +954,45 @@ class CalculativeBrain:
         z0 = ou.current_zscore
         if abs(z0) < self.zscore_thresh:
             return None
+        if not ou.is_reverting:
+            return None
         std = ou.stationary_std
-        stop_z = 1.4
-        sign = 1.0 if z0 > 0 else -1.0  # +1: above mean -> SELL
-        # Model probability of reaching μ before the stop, blended toward the
-        # zero-edge (random-walk) probability by the strength of the ADF evidence
-        p_model = ou_hit_probability(abs(z0), 0.0, abs(z0) + stop_z)
-        p_null = stop_z / (abs(z0) + stop_z)
+        if std <= 0:
+            return None
+
+        sign = 1.0 if z0 > 0 else -1.0  # +1: above mean -> SELL, -1: below mean -> BUY
+
+        # Target intermediate reversion or mean
+        target_dist = abs(ou.mu - price)
+        if target_dist <= 0:
+            return None
+
+        # Stop loss: set to at least 1.4x stationary std to avoid premature stops on mean reversion
+        stop_dist = max(std * 1.4, target_dist * 0.8)
+        # Cap stop distance to 0.35% max to avoid outsized losses
+        stop_dist = min(stop_dist, price * 0.0035)
+        stop_dist = max(stop_dist, price * 0.0008)
+
+        target = price - sign * target_dist
+        stop = price + sign * stop_dist
+
+        # Compute probability
+        p_model = ou_hit_probability(abs(z0), 0.0, abs(z0) + 1.4)
+        p_null = stop_dist / (target_dist + stop_dist)
         w = evidence_weight(ou.adf_tstat, self.adf_critical, self.adf_critical - 2.0)
+        p_final = float(np.clip(p_null + w * (p_model - p_null), 0.0, 0.90))
+
+        # Reject any setup where win probability is below 55%
+        if p_final < 0.55:
+            return None
+
         return _TradePlan(
             direction="SELL" if sign > 0 else "BUY",
             archetype="OU_MEAN_REVERSION",
-            target=ou.mu,
-            target_2=ou.mu - sign * std * 1.2,
-            stop=price + sign * std * stop_z,
-            win_prob=p_null + w * (p_model - p_null),
+            target=target,
+            target_2=target - sign * target_dist * 0.5,
+            stop=stop,
+            win_prob=p_final,
             horizon_bars=max(2, int(round(ou.expected_fpt_bars))),
         )
 
@@ -1164,7 +1188,7 @@ class CalculativeBrain:
                 edge_score *= confluence.confluence_multiplier
             edge_score = float(np.clip(edge_score, 0.0, 99.0))
 
-            if expected_r > 0:
+            if expected_r >= 0.15 and win_prob >= 0.55:
                 action = "SNIPE_BUY" if plan.direction == "BUY" else "SNIPE_SELL"
                 archetype = plan.archetype
                 target, target_2, invalidation = plan.target, plan.target_2, plan.stop

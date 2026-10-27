@@ -459,16 +459,32 @@ def run_cloud_surveillance_loop(cfg: SyntheticBotConfig, logger: logging.Logger)
             live_state = storage.get_all_state()
             open_trades = live_state.get("open_trades", {})
 
-            # Clean up any open trades whose symbol is no longer in active_symbols
+            # Clean up any open trades whose symbol is no longer in active_symbols or duplicate positions
+            seen_symbols = set()
             for d_ticket in list(open_trades.keys()):
                 d_t = open_trades.get(d_ticket)
-                if d_t and d_t.get("symbol") not in cfg.symbols:
-                    sym_del = d_t.get("symbol", "")
+                if not d_t:
+                    continue
+                d_sym = d_t.get("symbol", "")
+
+                # 1. Close if symbol is not in active symbols (e.g. Volatility 100 on micro account)
+                if d_sym not in cfg.symbols:
                     entry_p_del = float(d_t.get("entry_price", 0.0))
                     storage.close_trade(d_ticket, exit_price=entry_p_del, pnl_usd=0.0, pnl_r=0.0, close_reason="DECOMMISSIONED_SYMBOL_REMOVED")
                     if d_ticket in open_trades:
                         del open_trades[d_ticket]
-                    logger.info("🗑️ [CLEANUP] Closed position #%s on removed symbol '%s'", d_ticket, sym_del)
+                    logger.info("🗑️ [CLEANUP] Closed position #%s on removed symbol '%s'", d_ticket, d_sym)
+                    continue
+
+                # 2. Close duplicates if more than 1 trade exists on the same symbol!
+                if d_sym in seen_symbols:
+                    entry_p_del = float(d_t.get("entry_price", 0.0))
+                    storage.close_trade(d_ticket, exit_price=entry_p_del, pnl_usd=0.0, pnl_r=0.0, close_reason="DUPLICATE_POSITION_PURGED")
+                    if d_ticket in open_trades:
+                        del open_trades[d_ticket]
+                    logger.info("🗑️ [DUPLICATE PURGE] Closed stacked position #%s on '%s'", d_ticket, d_sym)
+                else:
+                    seen_symbols.add(d_sym)
             equity = float(live_state.get("equity", equity))
             balance = float(live_state.get("balance", balance))
             for sym in cfg.symbols:
@@ -589,6 +605,15 @@ def run_cloud_surveillance_loop(cfg: SyntheticBotConfig, logger: logging.Logger)
                 # 3. Quantitative Signal Evaluation
                 signal = strategy.evaluate(df, symbol=sym, account_balance=equity, timeframe=cfg.timeframe)
                 if signal and signal.sizing and signal.sizing.is_valid:
+                    # STRICT RULE 1: Maximum 1 open position per symbol! Never stack duplicate trades on the same market
+                    existing_sym_trades = [t for t in open_trades.values() if t.get("symbol") == signal.symbol]
+                    if len(existing_sym_trades) >= 1:
+                        continue
+
+                    # STRICT RULE 2: Minimum 55% win probability floor
+                    if signal.calculated_win_prob < 0.55:
+                        continue
+
                     ticket = str(900000 + (cycle_count * 100 + len(open_trades)) % 100000)
                     if len(open_trades) < cfg.max_open_trades and ticket not in open_trades:
                         new_trade_doc = {

@@ -145,6 +145,13 @@ class SyntheticStrategy:
             return None
         if analysis.math_edge_score < self.min_math_edge_score:
             return None
+        # Strict win probability floor (never trade against probability)
+        if analysis.calculated_win_probability < 0.55:
+            self.last_rejection = f"Win probability {analysis.calculated_win_probability:.1%} below 55% threshold"
+            return None
+        if analysis.expected_yield_r < 0.15:
+            self.last_rejection = f"Expected yield {analysis.expected_yield_r:+.2f}R below 0.15R threshold"
+            return None
 
         direction = "BUY" if analysis.recommended_action == "SNIPE_BUY" else "SELL"
         entry = float(analysis.current_price)
