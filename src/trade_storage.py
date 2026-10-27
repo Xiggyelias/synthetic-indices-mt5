@@ -157,7 +157,15 @@ class TradeStorageManager:
             try:
                 # Query Mongo
                 open_docs = list(self.trades_col.find({"status": "OPEN"}, {"_id": 0}))
-                open_trades = {str(d["ticket"]): d for d in open_docs if "ticket" in d}
+                # Strict deduplication: keep only latest unique open trade per symbol and ticket
+                open_trades = {}
+                seen_syms = set()
+                for d in reversed(open_docs):
+                    tkt = str(d.get("ticket", ""))
+                    sym = d.get("symbol", "")
+                    if tkt and sym not in seen_syms and tkt not in open_trades:
+                        open_trades[tkt] = d
+                        seen_syms.add(sym)
 
                 closed_docs = list(
                     self.trades_col.find({"status": "CLOSED"}, {"_id": 0}).sort("closed_at", -1).limit(200)
@@ -215,10 +223,10 @@ class TradeStorageManager:
         """
         now_str = datetime.now(timezone.utc).isoformat()
 
-        # Determine explicit Outcome
-        if pnl_usd > 0 or "PROFIT" in close_reason.upper() or "TP" in close_reason.upper():
+        # Determine explicit Outcome based strictly on mathematical PnL
+        if pnl_usd > 0.001:
             outcome = "WIN"
-        elif pnl_usd < 0 or "STOP" in close_reason.upper() or "LOSS" in close_reason.upper():
+        elif pnl_usd < -0.001:
             outcome = "LOSS"
         else:
             outcome = "BREAKEVEN"
@@ -263,7 +271,8 @@ class TradeStorageManager:
         # 2. Update MongoDB
         if self.is_connected and self.trades_col is not None and self.state_col is not None:
             try:
-                self.trades_col.update_one({"ticket": str(ticket)}, {"$set": closed_doc}, upsert=True)
+                tkt_q = {"$or": [{"ticket": str(ticket)}, {"ticket": int(ticket) if str(ticket).isdigit() else str(ticket)}]}
+                self.trades_col.update_many(tkt_q, {"$set": closed_doc})
                 self.state_col.update_one(
                     {"_id": "portfolio_state"},
                     {

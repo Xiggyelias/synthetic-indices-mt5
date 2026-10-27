@@ -31,6 +31,8 @@ from quant_brain import (
     resample_to_macro_timeframe,
     drift_hit_probability,
     ou_hit_probability,
+    compute_fractional_zscore,
+    compute_savitzky_golay_dynamics,
     CalculativeBrain,
 )
 from synthetic_risk_manager import SyntheticRiskManager
@@ -873,3 +875,37 @@ def test_backtest_thesis_exit_and_pyramid(monkeypatch):
     assert len(report.trades) == 2 and reasons == ["THESIS_BROKEN", "THESIS_BROKEN"]
     assert [t["pyramid_add"] for t in report.trades] == [False, True]  # the add came once the first leg was locked
     assert all(t["pnl_r"] > 0 for t in report.trades)
+
+
+def test_fractional_differentiation_and_savitzky_golay():
+    np.random.seed(101)
+    s = pd.Series(1000.0 + np.cumsum(np.random.randn(120)))
+    z_ffd = compute_fractional_zscore(s, d=0.40)
+    assert isinstance(z_ffd, float)
+    assert -5.0 < z_ffd < 5.0
+
+    smooth, vel, acc = compute_savitzky_golay_dynamics(s, window=15, polyorder=3)
+    assert isinstance(smooth, float)
+    assert isinstance(vel, float)
+    assert isinstance(acc, float)
+    assert smooth > 0.0
+
+
+def test_fractional_kinetic_plan_snipe():
+    brain = CalculativeBrain()
+    # Test oversold bounce: z_ffd < -1.6, acc > 0, kalman neutral
+    plan_buy = brain._fractional_kinetic_plan(
+        price=100.0,
+        z_ffd=-1.85,
+        vel=-0.05,
+        acc=+0.12,
+        gk_vol=0.005,
+        kalman_z=-1.2,
+    )
+    assert plan_buy is not None
+    assert plan_buy.direction == "BUY"
+    assert plan_buy.archetype == "FRACTIONAL_KINETIC_SNIPE"
+    assert plan_buy.target > 100.0
+    assert plan_buy.stop < 100.0
+    assert plan_buy.win_prob >= 0.65
+    assert (plan_buy.target - 100.0) / (100.0 - plan_buy.stop) >= 1.95

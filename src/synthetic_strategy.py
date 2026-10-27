@@ -92,6 +92,9 @@ def _rationale(a: QuantBrainAnalysis, kalman: str, var_level: str, rr: float) ->
     elif arch == "KALMAN_FAIR_VALUE_REVERSION":
         head = (f"Kalman fair value reversion. Deviation Z={a.kalman_zscore:+.2f}σ, "
                 f"Fair={a.kalman_fair_value:.4f}.")
+    elif arch == "FRACTIONAL_KINETIC_SNIPE":
+        head = (f"Fractional Kinetic Snipe. Z_ffd={a.metadata.get('z_ffd', 0.0):+.2f}σ, "
+                f"Vel={a.metadata.get('sg_vel', 0.0):+.3f}, Acc={a.metadata.get('sg_acc', 0.0):+.3f}.")
     elif a.poisson is not None:
         ph = a.poisson
         head = (f"{arch.replace('_', ' ').title()}. Spikes/bar={ph.base_rate:.3f}, "

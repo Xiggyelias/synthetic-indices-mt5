@@ -532,33 +532,33 @@ def run_cloud_surveillance_loop(cfg: SyntheticBotConfig, logger: logging.Logger)
                             closed = True
                             reason = "STOP_LOSS" if not t.get("moved_to_be") else "TRAILING_STOP"
                             exit_price = sl_p
-                        # 3. Dynamic Take Profit: bank profit when trade achieved >= 1.5R peak and retraces by >= 0.45R (locking in >= +1.05R banked)
-                        elif peak_r >= 1.5 and (peak_r - curr_r) >= 0.45:
+                        # 3. Dynamic Take Profit: bank profit when trade achieved >= 1.75R peak and retraces by >= 0.45R (locking in >= +1.30R banked cash)
+                        elif peak_r >= 1.75 and (peak_r - curr_r) >= 0.45:
                             closed = True
                             reason = "DYNAMIC_TAKE_PROFIT"
                             exit_price = curr_p
-                        # 4. Dynamic Runner Trailing at +1.6R and beyond: trail SL dynamically at peak_r - 0.45R
-                        elif peak_r >= 1.6:
+                        # 4. Dynamic Runner Trailing at +1.75R and beyond: trail SL dynamically at peak_r - 0.45R
+                        elif peak_r >= 1.75:
                             trail_sl = round(entry_p + (peak_r - 0.45) * r_dist, 5)
                             if sl_p < trail_sl:
                                 t["stop_loss"] = trail_sl
                                 t["moved_to_be"] = True
                                 storage.save_open_trade(ticket, t)
                                 logger.info("🚀 [RUNNER TRAIL] Ticket %s trailed SL to +%.2fR @ %.5f", ticket, peak_r - 0.45, trail_sl)
-                        # 5. Guaranteed Profit Lock at +1.1R: guarantee +0.60R cash
-                        elif (curr_p >= entry_p + 1.1 * r_dist or high_p >= entry_p + 1.1 * r_dist):
-                            lock_sl = round(entry_p + 0.60 * r_dist, 5)
+                        # 5. Guaranteed Profit Lock at +1.30R: guarantee +0.75R cash
+                        elif (curr_p >= entry_p + 1.30 * r_dist or high_p >= entry_p + 1.30 * r_dist):
+                            lock_sl = round(entry_p + 0.75 * r_dist, 5)
                             if sl_p < lock_sl:
                                 t["stop_loss"] = lock_sl
                                 t["moved_to_be"] = True
                                 storage.save_open_trade(ticket, t)
-                                logger.info("💰 [PROFIT LOCK] Ticket %s locked +0.60R profit @ %.5f", ticket, lock_sl)
-                        # 6. Fast Risk Neutralization at +0.65R: move SL to entry + 0.05R buffer
-                        elif (curr_p >= entry_p + 0.65 * r_dist or high_p >= entry_p + 0.65 * r_dist) and not t.get("moved_to_be"):
+                                logger.info("💰 [PROFIT LOCK] Ticket %s locked +0.75R profit @ %.5f", ticket, lock_sl)
+                        # 6. Fast Risk Neutralization at +0.80R: move SL to entry + 0.05R buffer
+                        elif (curr_p >= entry_p + 0.80 * r_dist or high_p >= entry_p + 0.80 * r_dist) and not t.get("moved_to_be"):
                             t["stop_loss"] = round(entry_p + 0.05 * r_dist, 5)
                             t["moved_to_be"] = True
                             storage.save_open_trade(ticket, t)
-                            logger.info("🛡️ [BE LOCK] Ticket %s moved to Breakeven+buffer @ %.5f (+0.65R trigger)", ticket, t["stop_loss"])
+                            logger.info("🛡️ [BE LOCK] Ticket %s moved to Breakeven+buffer @ %.5f (+0.80R trigger)", ticket, t["stop_loss"])
                     else:
                         # SELL DIRECTION
                         # 1. Full Take Profit hit
@@ -571,33 +571,33 @@ def run_cloud_surveillance_loop(cfg: SyntheticBotConfig, logger: logging.Logger)
                             closed = True
                             reason = "STOP_LOSS" if not t.get("moved_to_be") else "TRAILING_STOP"
                             exit_price = sl_p
-                        # 3. Dynamic Take Profit: bank profit when trade achieved >= 1.5R peak and retraces by >= 0.45R (locking in >= +1.05R banked)
-                        elif peak_r >= 1.5 and (peak_r - curr_r) >= 0.45:
+                        # 3. Dynamic Take Profit: bank profit when trade achieved >= 1.75R peak and retraces by >= 0.45R (locking in >= +1.30R banked cash)
+                        elif peak_r >= 1.75 and (peak_r - curr_r) >= 0.45:
                             closed = True
                             reason = "DYNAMIC_TAKE_PROFIT"
                             exit_price = curr_p
-                        # 4. Dynamic Runner Trailing at +1.6R and beyond: trail SL dynamically at peak_r - 0.45R
-                        elif peak_r >= 1.6:
+                        # 4. Dynamic Runner Trailing at +1.75R and beyond: trail SL dynamically at peak_r - 0.45R
+                        elif peak_r >= 1.75:
                             trail_sl = round(entry_p - (peak_r - 0.45) * r_dist, 5)
                             if sl_p > trail_sl:
                                 t["stop_loss"] = trail_sl
                                 t["moved_to_be"] = True
                                 storage.save_open_trade(ticket, t)
                                 logger.info("🚀 [RUNNER TRAIL] Ticket %s trailed SL to +%.2fR @ %.5f", ticket, peak_r - 0.45, trail_sl)
-                        # 5. Guaranteed Profit Lock at +1.1R: guarantee +0.60R cash
-                        elif (curr_p <= entry_p - 1.1 * r_dist or low_p <= entry_p - 1.1 * r_dist):
-                            lock_sl = round(entry_p - 0.60 * r_dist, 5)
+                        # 5. Guaranteed Profit Lock at +1.30R: guarantee +0.75R cash
+                        elif (curr_p <= entry_p - 1.30 * r_dist or low_p <= entry_p - 1.30 * r_dist):
+                            lock_sl = round(entry_p - 0.75 * r_dist, 5)
                             if sl_p > lock_sl:
                                 t["stop_loss"] = lock_sl
                                 t["moved_to_be"] = True
                                 storage.save_open_trade(ticket, t)
-                                logger.info("💰 [PROFIT LOCK] Ticket %s locked +0.60R profit @ %.5f", ticket, lock_sl)
-                        # 6. Fast Risk Neutralization at +0.65R: move SL to entry - 0.05R buffer
-                        elif (curr_p <= entry_p - 0.65 * r_dist or low_p <= entry_p - 0.65 * r_dist) and not t.get("moved_to_be"):
+                                logger.info("💰 [PROFIT LOCK] Ticket %s locked +0.75R profit @ %.5f", ticket, lock_sl)
+                        # 6. Fast Risk Neutralization at +0.80R: move SL to entry - 0.05R buffer
+                        elif (curr_p <= entry_p - 0.80 * r_dist or low_p <= entry_p - 0.80 * r_dist) and not t.get("moved_to_be"):
                             t["stop_loss"] = round(entry_p - 0.05 * r_dist, 5)
                             t["moved_to_be"] = True
                             storage.save_open_trade(ticket, t)
-                            logger.info("🛡️ [BE LOCK] Ticket %s moved to Breakeven+buffer @ %.5f (+0.65R trigger)", ticket, t["stop_loss"])
+                            logger.info("🛡️ [BE LOCK] Ticket %s moved to Breakeven+buffer @ %.5f (+0.80R trigger)", ticket, t["stop_loss"])
 
                     if closed:
                         pnl_points = (exit_price - entry_p) if direction == "BUY" else (entry_p - exit_price)

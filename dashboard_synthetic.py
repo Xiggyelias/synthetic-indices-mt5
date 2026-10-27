@@ -1766,18 +1766,20 @@ with tabs[4]:
     if closed_pos:
         st.markdown("##### 📜 Closed Trades History")
 
-        # Performance summary metrics
-        wins = [t for t in closed_pos if float(t.get("pnl_usd", 0.0)) > 0 or "WIN" in str(t.get("outcome", "")).upper() or "PROFIT" in str(t.get("close_reason", "")).upper()]
-        losses = [t for t in closed_pos if float(t.get("pnl_usd", 0.0)) < 0 or "LOSS" in str(t.get("outcome", "")).upper() or "STOP" in str(t.get("close_reason", "")).upper()]
+        # Performance summary metrics (strictly mutually exclusive)
+        wins = [t for t in closed_pos if float(t.get("pnl_usd", 0.0)) > 0.001]
+        losses = [t for t in closed_pos if float(t.get("pnl_usd", 0.0)) < -0.001]
+        bes = [t for t in closed_pos if abs(float(t.get("pnl_usd", 0.0))) <= 0.001]
         total_closed = len(closed_pos)
-        win_rate = (len(wins) / total_closed * 100.0) if total_closed > 0 else 0.0
+        win_rate = (len(wins) / (len(wins) + len(losses)) * 100.0) if (len(wins) + len(losses)) > 0 else 0.0
         tot_realized = sum(float(t.get("pnl_usd", 0.0)) for t in closed_pos)
 
         wcol1, wcol2, wcol3, wcol4 = st.columns([1.5, 1.5, 1.5, 1])
-        wcol1.metric("Win Rate", f"{win_rate:.1f}%", f"{len(wins)} Wins / {len(losses)} Losses")
+        wcol1.metric("Win Rate", f"{win_rate:.1f}%", f"{len(wins)}W / {len(losses)}L / {len(bes)}BE")
         wcol2.metric("Total Realized P&L", f"${tot_realized:+,.2f}", f"{total_closed} Total Trades")
         avg_w = (sum(float(t.get("pnl_usd", 0.0)) for t in wins) / len(wins)) if wins else 0.0
-        wcol3.metric("Avg Win", f"${avg_w:+,.2f}")
+        avg_l = (sum(float(t.get("pnl_usd", 0.0)) for t in losses) / len(losses)) if losses else 0.0
+        wcol3.metric("Avg Win / Loss", f"+${avg_w:.2f}", f"-${abs(avg_l):.2f}")
         with wcol4:
             st.write("")
             if st.button("🧹 Reset History", key="reset_hist_btn", use_container_width=True):
