@@ -939,7 +939,7 @@ if btn_col2.button("⏹️ Kill", disabled=not is_bot_running, use_container_wid
     st.rerun()
 
 st.sidebar.markdown("---")
-auto_refresh = st.sidebar.selectbox("Auto-Refresh Interval", ["Off", "10 seconds", "30 seconds", "60 seconds"], index=0)
+auto_refresh = st.sidebar.selectbox("⚡ Live Market Auto-Refresh", ["⚡ 3s (Live Ticking)", "5s (Standard)", "10s", "30s", "Off"], index=0)
 
 # ── Fetch or Generate Market Data ─────────────────────────────────────────────
 
@@ -1601,25 +1601,58 @@ with tabs[4]:
     closed_pos = cur_data.get("closed_trades", [])
     state_eq = float(cur_data.get("equity", 10000.0))
     state_bal = float(cur_data.get("balance", 10000.0))
-    total_pnl = state_eq - 10000.0
+
+    # Pre-calculate live spot prices and real-time floating PnL across all active positions
+    live_pos_data = {}
+    total_floating_usd = 0.0
+
+    for ticket, t in open_pos.items():
+        sym = t.get("symbol", "Volatility 75 Index")
+        direction = t.get("direction", "BUY")
+        entry_p = float(t.get("entry_price", 0.0))
+        sl_p = float(t.get("stop_loss", 0.0))
+        tp_p = float(t.get("take_profit", 0.0))
+        vol = float(t.get("volume", 0.01))
+
+        spot_tick = get_deriv_live_candles(sym, "M1", 2)
+        cur_p = float(spot_tick["close"].iloc[-1]) if spot_tick is not None and len(spot_tick) > 0 else entry_p
+
+        pnl_pts = (cur_p - entry_p) if direction == "BUY" else (entry_p - cur_p)
+        r_dist = max(abs(entry_p - sl_p), 1e-4)
+        pnl_r = round(pnl_pts / r_dist, 2)
+        pnl_usd = round(pnl_pts * vol, 2)
+        total_floating_usd += pnl_usd
+
+        live_pos_data[ticket] = {
+            **t,
+            "live_price": cur_p,
+            "pnl_usd": pnl_usd,
+            "pnl_r": pnl_r,
+        }
+
+    live_equity = round(state_eq + total_floating_usd, 2)
+    net_total_pnl = round(live_equity - 10000.0, 2)
 
     tm1, tm2, tm3, tm4 = st.columns(4)
     tm1.metric("Engine Mode", cur_data.get("mode", "LIVE_WEB"), "24/7 Autonomous" if is_bot_running else "Standby")
-    tm2.metric("Portfolio Equity", f"${state_eq:,.2f}", f"{total_pnl:+,.2f}")
+    tm2.metric("Portfolio Equity", f"${live_equity:,.2f}", f"{net_total_pnl:+,.2f} USD")
     tm3.metric("Active Positions", f"{len(open_pos)} / 6")
-    tm4.metric("Closed Trades", f"{len(closed_pos)}")
+    tm4.metric("Floating P&L", f"${total_floating_usd:+,.2f}", f"{len(closed_pos)} Closed Trades")
 
     # ── Active Positions Spreadsheet Matrix ──
-    st.markdown("##### 📂 Active Open Positions")
+    st.markdown("##### 📂 Active Open Positions (Live Real-Time)")
     if open_pos:
-        # Build clean spreadsheet DataFrame exactly matching user requested view
+        # Build clean spreadsheet DataFrame with real-time live prices and floating PnL
         open_rows = []
-        for ticket, t in open_pos.items():
+        for ticket, t in live_pos_data.items():
             open_rows.append({
                 "symbol": t.get("symbol", "—"),
                 "direction": t.get("direction", "BUY"),
                 "volume": t.get("volume", 0.0),
                 "entry_price": round(float(t.get("entry_price", 0.0)), 4),
+                "live_price": round(float(t.get("live_price", 0.0)), 4),
+                "floating_pnl": f"${t.get('pnl_usd', 0.0):+,.2f}",
+                "yield_r": f"{t.get('pnl_r', 0.0):+.2f}R",
                 "stop_loss": round(float(t.get("stop_loss", 0.0)), 4),
                 "take_profit": round(float(t.get("take_profit", 0.0)), 4),
                 "strategy_type": t.get("strategy_type", "—"),
@@ -1682,22 +1715,17 @@ with tabs[4]:
                 st.rerun()
 
         # ── Detailed Real-Time P&L Cards (Optional Expandable) ──
-        with st.expander("🎛️ Detailed Position Cards with Live Floating P&L", expanded=False):
-            for ticket, t in list(open_pos.items()):
+        with st.expander("🎛️ Detailed Position Cards with Live Floating P&L", expanded=True):
+            for ticket, t in live_pos_data.items():
                 sym = t.get("symbol", "Volatility 75 Index")
                 direction = t.get("direction", "BUY")
                 entry_p = float(t.get("entry_price", 0.0))
                 sl_p = float(t.get("stop_loss", 0.0))
                 tp_p = float(t.get("take_profit", 0.0))
                 vol = float(t.get("volume", 0.01))
-
-                spot_tick = get_deriv_live_candles(sym, "M1", 2)
-                cur_p = float(spot_tick["close"].iloc[-1]) if spot_tick is not None and len(spot_tick) > 0 else entry_p
-
-                pnl_pts = (cur_p - entry_p) if direction == "BUY" else (entry_p - cur_p)
-                r_dist = max(abs(entry_p - sl_p), 1e-4)
-                pnl_r = pnl_pts / r_dist
-                pnl_usd = pnl_pts * vol
+                cur_p = float(t.get("live_price", entry_p))
+                pnl_r = float(t.get("pnl_r", 0.0))
+                pnl_usd = float(t.get("pnl_usd", 0.0))
                 pnl_color = "#3fb950" if pnl_usd >= 0 else "#f85149"
 
                 with st.container():
@@ -1887,7 +1915,12 @@ Maximizes asymptotic growth rate. Zero probability of ruin.
 
 # ── Auto-Refresh Logic ────────────────────────────────────────────────────────
 if auto_refresh != "Off":
-    sec_map = {"10 seconds": 10, "30 seconds": 30, "60 seconds": 60}
-    delay = sec_map.get(auto_refresh, 30)
+    sec_map = {
+        "⚡ 3s (Live Ticking)": 3,
+        "5s (Standard)": 5,
+        "10s": 10,
+        "30s": 30,
+    }
+    delay = sec_map.get(auto_refresh, 3)
     time.sleep(delay)
     st.rerun()
