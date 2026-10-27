@@ -48,6 +48,7 @@ from quant_brain import (
 from synthetic_risk_manager import SyntheticRiskManager, DERIV_SYNTHETIC_SPECS
 from trade_storage import TradeStorageManager
 from synthetic_backtester import SyntheticBacktestEngine, generate_synthetic_market_data
+from deriv_web_feed import get_deriv_live_candles
 
 # ── Streamlit Page Configuration ──────────────────────────────────────────────
 st.set_page_config(
