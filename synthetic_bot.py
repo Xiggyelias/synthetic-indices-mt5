@@ -467,6 +467,8 @@ def run_cloud_surveillance_loop(cfg: SyntheticBotConfig, logger: logging.Logger)
                     df = generate_synthetic_market_data(symbol=sym, n_bars=cfg.lookback_bars, seed=(hash(sym) + cycle_count) % 100000)
 
                 curr_p = float(df["close"].iloc[-1])
+                high_p = float(df["high"].iloc[-1]) if "high" in df else curr_p
+                low_p = float(df["low"].iloc[-1]) if "low" in df else curr_p
 
                 # 2. Position lifecycle management for open trades on this symbol
                 for ticket in list(open_trades.keys()):
@@ -486,29 +488,29 @@ def run_cloud_surveillance_loop(cfg: SyntheticBotConfig, logger: logging.Logger)
                     exit_price = curr_p
 
                     if direction == "BUY":
-                        if curr_p >= tp_p:
+                        if curr_p >= tp_p or high_p >= tp_p:
                             closed = True
                             reason = "TAKE_PROFIT"
                             exit_price = tp_p
-                        elif curr_p <= sl_p:
+                        elif curr_p <= sl_p or low_p <= sl_p:
                             closed = True
                             reason = "STOP_LOSS"
                             exit_price = sl_p
-                        elif curr_p >= entry_p + r_dist and not t.get("moved_to_be"):
+                        elif (curr_p >= entry_p + r_dist or high_p >= entry_p + r_dist) and not t.get("moved_to_be"):
                             t["stop_loss"] = entry_p
                             t["moved_to_be"] = True
                             storage.save_open_trade(ticket, t)
                             logger.info("🛡️ [BE LOCK] Ticket %s moved to Breakeven @ %.5f", ticket, entry_p)
                     else:
-                        if curr_p <= tp_p:
+                        if curr_p <= tp_p or low_p <= tp_p:
                             closed = True
                             reason = "TAKE_PROFIT"
                             exit_price = tp_p
-                        elif curr_p >= sl_p:
+                        elif curr_p >= sl_p or high_p >= sl_p:
                             closed = True
                             reason = "STOP_LOSS"
                             exit_price = sl_p
-                        elif curr_p <= entry_p - r_dist and not t.get("moved_to_be"):
+                        elif (curr_p <= entry_p - r_dist or low_p <= entry_p - r_dist) and not t.get("moved_to_be"):
                             t["stop_loss"] = entry_p
                             t["moved_to_be"] = True
                             storage.save_open_trade(ticket, t)
