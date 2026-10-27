@@ -46,6 +46,7 @@ from quant_brain import (
     fit_kalman_filter,
 )
 from synthetic_risk_manager import SyntheticRiskManager, DERIV_SYNTHETIC_SPECS
+from trade_storage import TradeStorageManager
 from synthetic_backtester import SyntheticBacktestEngine, generate_synthetic_market_data
 
 # ── Streamlit Page Configuration ──────────────────────────────────────────────
@@ -824,14 +825,9 @@ elif is_bot_running:
 else:
     mt5_badge = "⚡ CLOUD QUANT ENGINE: Standby"
 
-# Read state file for telemetry
-engine_state = {}
-state_file = ROOT / "data" / "synthetic_state.json"
-if state_file.exists():
-    try:
-        engine_state = json.loads(state_file.read_text(encoding="utf-8"))
-    except Exception:
-        pass
+# Read state via TradeStorageManager (MongoDB + Local sync)
+storage = TradeStorageManager()
+engine_state = storage.get_all_state()
 
 raw_cycle = engine_state.get("cycle_count", None)
 if raw_cycle is not None:
@@ -1493,7 +1489,21 @@ with tabs[3]:
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 with tabs[4]:
     st.subheader("📋 Active Positions & Trade History")
-    state_file = ROOT / "data" / "synthetic_state.json"
+    storage = TradeStorageManager()
+    storage_info = storage.get_status_summary()
+
+    # ── Database & Storage Connectivity Status ──
+    if storage_info["is_connected"]:
+        st.success(
+            f"🍃 **MongoDB Real-Time Sync Active** · Host: `{storage_info['host']}` · Database: `{storage_info['database']}` · "
+            f"Open Positions: **{storage_info['open_trades_count']}** · Stored Closed Trades: **{storage_info['closed_trades_count']}** · "
+            f"All trade events permanently persisted."
+        )
+    else:
+        st.info(
+            f"📁 **Trade Storage Engine:** Local Persistent Cache (`data/synthetic_state.json`) · "
+            f"Internal MongoDB Service `{storage_info['host']}` configured for Dokploy Docker network."
+        )
 
     # ── Interactive Verification Trade Execution Box ──
     with st.expander("🧪 Open Live Market Verification Trade (Instant Execution)", expanded=True):
@@ -1527,14 +1537,7 @@ with tabs[4]:
                     tp_target = round(spot_p + 1.5 * r_pts if exec_dir == "BUY" else spot_p - 1.5 * r_pts, 4)
                     t_ticket = f"VERIFY-{int(time.time()) % 100000}"
 
-                    cur_data = {"open_trades": {}, "closed_trades": [], "equity": 10000.0, "balance": 10000.0, "mode": "CLOUD_AUTONOMOUS_LIVE_WEB"}
-                    if state_file.exists():
-                        try:
-                            cur_data = json.loads(state_file.read_text(encoding="utf-8"))
-                        except Exception:
-                            pass
-
-                    cur_data.setdefault("open_trades", {})[t_ticket] = {
+                    new_trade_doc = {
                         "ticket": t_ticket,
                         "symbol": exec_symbol,
                         "direction": exec_dir,
@@ -1551,9 +1554,7 @@ with tabs[4]:
                         "moved_to_be": False,
                         "tp1_reached": False,
                     }
-                    cur_data["updated_at"] = datetime.now(timezone.utc).isoformat()
-                    state_file.parent.mkdir(parents=True, exist_ok=True)
-                    state_file.write_text(json.dumps(cur_data, indent=2), encoding="utf-8")
+                    storage.save_open_trade(t_ticket, new_trade_doc)
                     st.toast(f"✅ Executed {exec_dir} on {exec_symbol} @ {spot_p:,.4f}!", icon="🎯")
                     time.sleep(0.4)
                     st.rerun()
@@ -1561,21 +1562,16 @@ with tabs[4]:
                     st.error(f"Could not retrieve live spot price for {exec_symbol} from Deriv WebSocket.")
 
     # ── State Summary Metrics ──
-    cur_data = {"open_trades": {}, "closed_trades": [], "equity": 10000.0, "balance": 10000.0, "mode": "CLOUD_AUTONOMOUS_LIVE_WEB"}
-    if state_file.exists():
-        try:
-            cur_data = json.loads(state_file.read_text(encoding="utf-8"))
-        except Exception:
-            pass
+    cur_data = storage.get_all_state()
     
-    # Auto-seed verification trade if file does not exist or open_trades is empty
+    # Auto-seed verification trade if both open and closed are completely empty
     if not cur_data.get("open_trades") and not cur_data.get("closed_trades"):
         try:
             v75_df = get_deriv_live_candles("Volatility 75 Index", "M1", 5)
             if v75_df is not None and len(v75_df) > 0:
                 seed_p = float(v75_df["close"].iloc[-1])
                 r_seed = seed_p * 0.008
-                cur_data.setdefault("open_trades", {})["VERIFY-7501"] = {
+                seed_doc = {
                     "ticket": "VERIFY-7501",
                     "symbol": "Volatility 75 Index",
                     "direction": "BUY",
@@ -1592,9 +1588,8 @@ with tabs[4]:
                     "moved_to_be": False,
                     "tp1_reached": False,
                 }
-                cur_data["updated_at"] = datetime.now(timezone.utc).isoformat()
-                state_file.parent.mkdir(parents=True, exist_ok=True)
-                state_file.write_text(json.dumps(cur_data, indent=2), encoding="utf-8")
+                storage.save_open_trade("VERIFY-7501", seed_doc)
+                cur_data = storage.get_all_state()
         except Exception:
             pass
 
@@ -1611,7 +1606,31 @@ with tabs[4]:
     tm4.metric("Closed Trades", f"{len(closed_pos)}")
 
     # ── Active Positions with Real-Time P&L & Close Buttons ──
-    st.markdown("##### 📂 Active Open Positions")
+    col_pos_hdr, col_pos_act = st.columns([3, 1])
+    with col_pos_hdr:
+        st.markdown("##### 📂 Active Open Positions")
+    with col_pos_act:
+        if len(open_pos) > 1:
+            if st.button("🚨 Emergency Close All", key="close_all_pos_btn", type="secondary", use_container_width=True):
+                closed_count = 0
+                net_pnl_all = 0.0
+                for ticket_k, t_pos in list(open_pos.items()):
+                    sym_k = t_pos.get("symbol", "")
+                    s_tick = get_deriv_live_candles(sym_k, "M1", 2)
+                    c_price = float(s_tick["close"].iloc[-1]) if s_tick is not None and len(s_tick) > 0 else float(t_pos.get("entry_price", 0.0))
+                    e_price = float(t_pos.get("entry_price", c_price))
+                    d_dir = t_pos.get("direction", "BUY")
+                    pts_k = (c_price - e_price) if d_dir == "BUY" else (e_price - c_price)
+                    r_dk = max(abs(e_price - float(t_pos.get("stop_loss", e_price))), 1e-4)
+                    pnl_u = round(pts_k * float(t_pos.get("volume", 0.01)), 2)
+                    pnl_r_k = round(pts_k / r_dk, 2)
+                    storage.close_trade(ticket_k, exit_price=c_price, pnl_usd=pnl_u, pnl_r=pnl_r_k, close_reason="EMERGENCY_CLOSE_ALL")
+                    net_pnl_all += pnl_u
+                    closed_count += 1
+                st.toast(f"🚨 Closed all {closed_count} positions | Net PnL: ${net_pnl_all:+.2f} USD", icon="🏁")
+                time.sleep(0.4)
+                st.rerun()
+
     if open_pos:
         for ticket, t in list(open_pos.items()):
             sym = t.get("symbol", "Volatility 75 Index")
@@ -1653,19 +1672,13 @@ with tabs[4]:
                 with pcol6:
                     st.write("")
                     if st.button("❌ Close", key=f"close_t_{ticket}", type="secondary", use_container_width=True):
-                        cur_data.setdefault("closed_trades", []).append({
-                            **t,
-                            "exit_price": round(cur_p, 4),
-                            "closed_at": datetime.now(timezone.utc).isoformat(),
-                            "close_reason": "MANUAL_CLOSE",
-                            "pnl_r": round(pnl_r, 2),
-                            "pnl_usd": round(pnl_usd, 2),
-                        })
-                        del cur_data["open_trades"][ticket]
-                        cur_data["equity"] = round(cur_data.get("equity", 10000.0) + pnl_usd, 2)
-                        cur_data["balance"] = round(cur_data.get("balance", 10000.0) + pnl_usd, 2)
-                        cur_data["updated_at"] = datetime.now(timezone.utc).isoformat()
-                        state_file.write_text(json.dumps(cur_data, indent=2), encoding="utf-8")
+                        storage.close_trade(
+                            ticket=ticket,
+                            exit_price=round(cur_p, 4),
+                            pnl_usd=round(pnl_usd, 2),
+                            pnl_r=round(pnl_r, 2),
+                            close_reason="MANUAL_CLOSE",
+                        )
                         st.toast(f"🏁 Closed position #{ticket} | Realized: ${pnl_usd:+.2f} USD", icon="💵")
                         time.sleep(0.3)
                         st.rerun()
@@ -1678,8 +1691,8 @@ with tabs[4]:
         st.markdown("##### 📜 Closed Trades History")
 
         # Performance summary metrics
-        wins = [t for t in closed_pos if float(t.get("pnl_usd", 0.0)) > 0 or "PROFIT" in str(t.get("close_reason", "")).upper()]
-        losses = [t for t in closed_pos if float(t.get("pnl_usd", 0.0)) < 0 or "STOP" in str(t.get("close_reason", "")).upper() or "LOSS" in str(t.get("close_reason", "")).upper()]
+        wins = [t for t in closed_pos if float(t.get("pnl_usd", 0.0)) > 0 or "WIN" in str(t.get("outcome", "")).upper() or "PROFIT" in str(t.get("close_reason", "")).upper()]
+        losses = [t for t in closed_pos if float(t.get("pnl_usd", 0.0)) < 0 or "LOSS" in str(t.get("outcome", "")).upper() or "STOP" in str(t.get("close_reason", "")).upper()]
         total_closed = len(closed_pos)
         win_rate = (len(wins) / total_closed * 100.0) if total_closed > 0 else 0.0
         tot_realized = sum(float(t.get("pnl_usd", 0.0)) for t in closed_pos)
@@ -1692,10 +1705,7 @@ with tabs[4]:
         with wcol4:
             st.write("")
             if st.button("🧹 Reset History", key="reset_hist_btn", use_container_width=True):
-                cur_data["closed_trades"] = []
-                cur_data["equity"] = 10000.0
-                cur_data["balance"] = 10000.0
-                state_file.write_text(json.dumps(cur_data, indent=2), encoding="utf-8")
+                storage.reset_history(10000.0, 10000.0)
                 st.toast("Trade history reset.", icon="🧹")
                 time.sleep(0.3)
                 st.rerun()
@@ -1707,12 +1717,21 @@ with tabs[4]:
             pnl_r = float(t.get("pnl_r", 0.0))
             reason = str(t.get("close_reason", "")).upper()
 
-            if pnl_usd > 0 or "PROFIT" in reason or "TP" in reason:
-                outcome = "🟢 WIN"
-            elif pnl_usd < 0 or "STOP" in reason or "LOSS" in reason or "SL" in reason:
-                outcome = "🔴 LOSS"
+            outcome = t.get("outcome")
+            if not outcome:
+                if pnl_usd > 0 or "PROFIT" in reason or "TP" in reason:
+                    outcome = "🟢 WIN"
+                elif pnl_usd < 0 or "STOP" in reason or "LOSS" in reason or "SL" in reason:
+                    outcome = "🔴 LOSS"
+                else:
+                    outcome = "⚪ BREAKEVEN"
             else:
-                outcome = "⚪ BREAKEVEN"
+                if "WIN" in str(outcome):
+                    outcome = "🟢 WIN"
+                elif "LOSS" in str(outcome):
+                    outcome = "🔴 LOSS"
+                else:
+                    outcome = "⚪ BREAKEVEN"
 
             if "TAKE_PROFIT" in reason:
                 reason_clean = "🎯 TAKE PROFIT"
@@ -1720,6 +1739,8 @@ with tabs[4]:
                 reason_clean = "🛑 STOP LOSS"
             elif "MANUAL" in reason:
                 reason_clean = "✋ MANUAL EXIT"
+            elif "EMERGENCY" in reason:
+                reason_clean = "🚨 EMERGENCY CLOSE"
             else:
                 reason_clean = reason or "CLOSED"
 

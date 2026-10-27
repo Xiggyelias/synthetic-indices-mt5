@@ -392,6 +392,7 @@ def run_cloud_surveillance_loop(cfg: SyntheticBotConfig, logger: logging.Logger)
     from synthetic_strategy import SyntheticStrategy
     from synthetic_risk_manager import SyntheticRiskManager
     from telegram_notifier import build_telegram_config_from_env, TelegramNotifier
+    from trade_storage import TradeStorageManager
 
     brain = CalculativeBrain.from_config(cfg.brain_params)
     risk_mgr = SyntheticRiskManager(
@@ -417,20 +418,11 @@ def run_cloud_surveillance_loop(cfg: SyntheticBotConfig, logger: logging.Logger)
     pid_file.parent.mkdir(parents=True, exist_ok=True)
     pid_file.write_text(str(os.getpid()), encoding="utf-8")
 
-    open_trades: Dict[str, Any] = {}
-    closed_trades: List[Any] = []
-    equity = 10000.0
-    balance = 10000.0
-
-    if state_path.exists():
-        try:
-            existing = json.loads(state_path.read_text(encoding="utf-8"))
-            open_trades = existing.get("open_trades", {})
-            closed_trades = existing.get("closed_trades", [])
-            equity = float(existing.get("equity", 10000.0))
-            balance = float(existing.get("balance", 10000.0))
-        except Exception:
-            pass
+    storage = TradeStorageManager(state_file=state_path)
+    init_state = storage.get_all_state()
+    open_trades: Dict[str, Any] = init_state.get("open_trades", {})
+    equity = float(init_state.get("equity", 10000.0))
+    balance = float(init_state.get("balance", 10000.0))
 
     cycle_count = 0
     if notifier:
@@ -441,6 +433,11 @@ def run_cloud_surveillance_loop(cfg: SyntheticBotConfig, logger: logging.Logger)
     try:
         while True:
             cycle_count += 1
+            # Real-time state synchronization with MongoDB / Dashboard
+            live_state = storage.get_all_state()
+            open_trades = live_state.get("open_trades", {})
+            equity = float(live_state.get("equity", equity))
+            balance = float(live_state.get("balance", balance))
             for sym in cfg.symbols:
                 # 1. Fetch live Deriv WebSocket market candles
                 df = get_deriv_live_candles(sym, cfg.timeframe, cfg.lookback_bars)
@@ -478,19 +475,21 @@ def run_cloud_surveillance_loop(cfg: SyntheticBotConfig, logger: logging.Logger)
                         elif curr_p >= entry_p + r_dist and not t.get("moved_to_be"):
                             t["stop_loss"] = entry_p
                             t["moved_to_be"] = True
+                            storage.save_open_trade(ticket, t)
                             logger.info("🛡️ [BE LOCK] Ticket %s moved to Breakeven @ %.5f", ticket, entry_p)
                     else:
                         if curr_p <= tp_p:
                             closed = True
                             reason = "TAKE_PROFIT"
                             exit_price = tp_p
-                        elif curr_p <= sl_p:
+                        elif curr_p >= sl_p:
                             closed = True
                             reason = "STOP_LOSS"
                             exit_price = sl_p
                         elif curr_p <= entry_p - r_dist and not t.get("moved_to_be"):
                             t["stop_loss"] = entry_p
                             t["moved_to_be"] = True
+                            storage.save_open_trade(ticket, t)
                             logger.info("🛡️ [BE LOCK] Ticket %s moved to Breakeven @ %.5f", ticket, entry_p)
 
                     if closed:
@@ -500,16 +499,15 @@ def run_cloud_surveillance_loop(cfg: SyntheticBotConfig, logger: logging.Logger)
                         equity = round(equity + pnl_usd, 2)
                         balance = round(balance + pnl_usd, 2)
 
-                        closed_trades.append({
-                            **t,
-                            "ticket": ticket,
-                            "exit_price": round(exit_price, 5),
-                            "closed_at": datetime.now(timezone.utc).isoformat(),
-                            "close_reason": reason,
-                            "pnl_r": pnl_r,
-                            "pnl_usd": pnl_usd,
-                        })
-                        del open_trades[ticket]
+                        storage.close_trade(
+                            ticket=ticket,
+                            exit_price=round(exit_price, 5),
+                            pnl_usd=pnl_usd,
+                            pnl_r=pnl_r,
+                            close_reason=reason,
+                        )
+                        if ticket in open_trades:
+                            del open_trades[ticket]
                         logger.info("🏁 [TRADE CLOSED] #%s %s %s -> %s | PnL: %+.2fR ($%+.2f) | Equity: $%.2f",
                                     ticket, direction, sym, reason, pnl_r, pnl_usd, equity)
 
@@ -518,7 +516,8 @@ def run_cloud_surveillance_loop(cfg: SyntheticBotConfig, logger: logging.Logger)
                 if signal and signal.sizing and signal.sizing.is_valid:
                     ticket = str(900000 + (cycle_count * 100 + len(open_trades)) % 100000)
                     if len(open_trades) < cfg.max_open_trades and ticket not in open_trades:
-                        open_trades[ticket] = {
+                        new_trade_doc = {
+                            "ticket": ticket,
                             "symbol": signal.symbol,
                             "direction": signal.direction,
                             "volume": signal.sizing.volume,
@@ -531,7 +530,11 @@ def run_cloud_surveillance_loop(cfg: SyntheticBotConfig, logger: logging.Logger)
                             "kalman_confirmation": signal.kalman_confirmation,
                             "var_risk_level": signal.var_risk_level,
                             "opened_at": datetime.now(timezone.utc).isoformat(),
+                            "moved_to_be": False,
+                            "tp1_reached": False,
                         }
+                        open_trades[ticket] = new_trade_doc
+                        storage.save_open_trade(ticket, new_trade_doc)
                         logger.info("🎯 [CLOUD SIGNAL] %s %s | Edge: %.1f%% | Vol: %.3f | Ticket: %s",
                                     signal.symbol, signal.direction, signal.math_edge_score, signal.sizing.volume, ticket)
                         if notifier:
@@ -546,16 +549,7 @@ def run_cloud_surveillance_loop(cfg: SyntheticBotConfig, logger: logging.Logger)
                                 "strategy": signal.strategy_type,
                             })
 
-            payload = {
-                "open_trades": open_trades,
-                "closed_trades": closed_trades[-200:],
-                "equity": equity,
-                "balance": balance,
-                "updated_at": datetime.now(timezone.utc).isoformat(),
-                "cycle_count": cycle_count,
-                "mode": "CLOUD_AUTONOMOUS_LIVE_WEB",
-            }
-            state_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+            storage.update_portfolio_state(equity=equity, balance=balance, mode="CLOUD_AUTONOMOUS_LIVE_WEB")
             if cycle_count % 5 == 1:
                 logger.info("⚡ [SURVEILLANCE HEARTBEAT] Cycle %d | Open Pos: %d | Equity: $%.2f | Monitored: %d instruments",
                             cycle_count, len(open_trades), equity, len(cfg.symbols))
