@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -19,6 +20,9 @@ import pandas as pd
 import websockets
 
 logger = logging.getLogger("deriv-web-feed")
+
+# Global in-memory candle cache: (symbol, timeframe, count) -> (timestamp, DataFrame)
+_DERIV_CANDLE_CACHE: Dict[Tuple[str, str, int], Tuple[float, pd.DataFrame]] = {}
 
 # Deriv official symbol mapping for synthetic indices
 DERIV_SYMBOL_MAP: Dict[str, str] = {
@@ -146,8 +150,16 @@ def get_deriv_live_candles(
     symbol_name: str,
     timeframe: str = "M5",
     count: int = 150,
+    ttl: float = 3.0,
 ) -> Optional[pd.DataFrame]:
-    """Synchronous caller for Streamlit / sync routines."""
+    """Synchronous caller for Streamlit / sync routines with high-speed in-memory TTL cache."""
+    cache_key = (symbol_name.strip().upper(), timeframe.upper(), int(count))
+    now = time.time()
+    if cache_key in _DERIV_CANDLE_CACHE:
+        cached_ts, cached_df = _DERIV_CANDLE_CACHE[cache_key]
+        if (now - cached_ts) < ttl and cached_df is not None and not cached_df.empty:
+            return cached_df.copy()
+
     try:
         loop = None
         try:
@@ -155,15 +167,26 @@ def get_deriv_live_candles(
         except RuntimeError:
             pass
 
+        df: Optional[pd.DataFrame] = None
         if loop and loop.is_running():
             import concurrent.futures
             with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-                fut = pool.submit(lambda: asyncio.run(fetch_deriv_candles_async(symbol_name, timeframe, count)))
-                return fut.result(timeout=7.0)
+                fut = pool.submit(lambda: asyncio.run(fetch_deriv_candles_async(symbol_name, timeframe, count, timeout=4.0)))
+                df = fut.result(timeout=4.0)
         else:
-            return asyncio.run(fetch_deriv_candles_async(symbol_name, timeframe, count))
+            df = asyncio.run(fetch_deriv_candles_async(symbol_name, timeframe, count, timeout=4.0))
+
+        if df is not None and not df.empty:
+            _DERIV_CANDLE_CACHE[cache_key] = (now, df)
+            return df
+        # If fetch timed out or returned None, return cached data if available even if slightly older
+        if cache_key in _DERIV_CANDLE_CACHE:
+            return _DERIV_CANDLE_CACHE[cache_key][1].copy()
+        return None
     except Exception as exc:
         logger.debug("Sync Deriv candle fetch error: %s", exc)
+        if cache_key in _DERIV_CANDLE_CACHE:
+            return _DERIV_CANDLE_CACHE[cache_key][1].copy()
         return None
 
 

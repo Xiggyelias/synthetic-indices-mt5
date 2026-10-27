@@ -829,8 +829,12 @@ elif is_bot_running:
 else:
     mt5_badge = "⚡ CLOUD QUANT ENGINE: Standby"
 
-# Read state via TradeStorageManager (MongoDB + Local sync)
-storage = TradeStorageManager()
+# Read state via TradeStorageManager (MongoDB + Local sync) cached as singleton
+@st.cache_resource
+def get_trade_storage_instance() -> TradeStorageManager:
+    return TradeStorageManager()
+
+storage = get_trade_storage_instance()
 engine_state = storage.get_all_state()
 
 raw_cycle = engine_state.get("cycle_count", None)
@@ -939,7 +943,7 @@ if btn_col2.button("⏹️ Kill", disabled=not is_bot_running, use_container_wid
     st.rerun()
 
 st.sidebar.markdown("---")
-auto_refresh = st.sidebar.selectbox("⚡ Live Market Auto-Refresh", ["⚡ 3s (Live Ticking)", "5s (Standard)", "10s", "30s", "Off"], index=0)
+auto_refresh = st.sidebar.selectbox("⚡ Live Market Auto-Refresh", ["⚡ 5s (Smooth Real-Time)", "⚡ 3s (Ultra-Fast)", "10s (Relaxed)", "30s", "Off"], index=0)
 
 # ── Fetch or Generate Market Data ─────────────────────────────────────────────
 
@@ -965,7 +969,7 @@ if market_df is None and data_feed_source.startswith("Automatic") and conn:
 if market_df is None and data_feed_source.startswith("Automatic"):
     try:
         from deriv_web_feed import get_deriv_live_candles
-        live_df = get_deriv_live_candles(selected_symbol, selected_tf, sample_size)
+        live_df = get_deriv_live_candles(selected_symbol, selected_tf, sample_size, ttl=3.0)
         if live_df is not None and len(live_df) >= 30:
             market_df = live_df
             data_mode = "LIVE_DERIV_WEB"
@@ -1501,7 +1505,7 @@ with tabs[3]:
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 with tabs[4]:
     st.subheader("📋 Active Positions & Trade History")
-    storage = TradeStorageManager()
+    storage = get_trade_storage_instance()
     storage_info = storage.get_status_summary()
 
     # ── Database & Storage Connectivity Status ──
@@ -1622,8 +1626,12 @@ with tabs[4]:
         tp_p = float(t.get("take_profit", 0.0))
         vol = float(t.get("volume", 0.01))
 
-        spot_tick = get_deriv_live_candles(sym, "M1", 2)
-        cur_p = float(spot_tick["close"].iloc[-1]) if spot_tick is not None and len(spot_tick) > 0 else entry_p
+        # Fast price lookup: reuse market_df if current symbol matches
+        if sym == selected_symbol and market_df is not None and len(market_df) > 0:
+            cur_p = float(market_df["close"].iloc[-1])
+        else:
+            spot_tick = get_deriv_live_candles(sym, "M1", 2, ttl=3.0)
+            cur_p = float(spot_tick["close"].iloc[-1]) if spot_tick is not None and len(spot_tick) > 0 else entry_p
 
         pnl_pts = (cur_p - entry_p) if direction == "BUY" else (entry_p - cur_p)
         r_dist = max(abs(entry_p - sl_p), 1e-4)
@@ -1935,11 +1943,11 @@ Maximizes asymptotic growth rate. Zero probability of ruin.
 # ── Auto-Refresh Logic ────────────────────────────────────────────────────────
 if auto_refresh != "Off":
     sec_map = {
-        "⚡ 3s (Live Ticking)": 3,
-        "5s (Standard)": 5,
-        "10s": 10,
+        "⚡ 5s (Smooth Real-Time)": 5,
+        "⚡ 3s (Ultra-Fast)": 3,
+        "10s (Relaxed)": 10,
         "30s": 30,
     }
-    delay = sec_map.get(auto_refresh, 3)
+    delay = sec_map.get(auto_refresh, 5)
     time.sleep(delay)
     st.rerun()
