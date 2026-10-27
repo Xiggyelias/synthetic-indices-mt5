@@ -52,8 +52,8 @@
     "kalman_trail_enable": true
   },
   "micro_account_notes": {
-    "starting_balance": 5.0,
-    "target_balance": 1000.0,
+    "starting_balance": 10.0,
+    "target_balance": 300.0,
     "growth_multiplier": 200,
     "tradeable_symbols": [
       "Volatility 75 Index",
@@ -81,5 +81,6 @@
     "enabled": true,
     "path": "data/synthetic_calibration.json",
     "_notes": "After each closed trade the bot compares the win probability it claimed with the result, per strategy, and scales future claims (shrunk toward 1.0 by 20 pseudo-trades)."
-  }
+  },
+  "starting_balance": 10.0
 }

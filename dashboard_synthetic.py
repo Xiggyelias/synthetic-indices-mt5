@@ -837,6 +837,17 @@ def get_trade_storage_instance() -> TradeStorageManager:
 storage = get_trade_storage_instance()
 engine_state = storage.get_all_state()
 
+# Read starting capital from config (supports $5, $10, $50, etc.)
+_cfg_path = ROOT / "config" / "config_synthetic.json"
+_starting_capital = 10000.0
+try:
+    import json as _j
+    _cfg_data = _j.loads(_cfg_path.read_text(encoding="utf-8")) if _cfg_path.exists() else {}
+    _starting_capital = float(_cfg_data.get("starting_balance", _cfg_data.get("micro_account_notes", {}).get("starting_balance", 10000.0)))
+except Exception:
+    pass
+STARTING_CAPITAL = float(os.environ.get("STARTING_BALANCE", _starting_capital))
+
 raw_cycle = engine_state.get("cycle_count", None)
 if raw_cycle is not None:
     cycle_num = f"#{raw_cycle}"
@@ -1392,7 +1403,7 @@ with tabs[2]:
     with bc1:
         sim_bars = st.slider("Simulation Bars", min_value=100, max_value=2000, value=500, step=50)
     with bc2:
-        start_cap = st.number_input("Starting Capital ($)", min_value=100.0, max_value=1000000.0, value=10000.0, step=500.0)
+        start_cap = st.number_input("Starting Capital ($)", min_value=1.0, max_value=1000000.0, value=STARTING_CAPITAL, step=10.0)
     with bc3:
         bt_data_mode = st.selectbox("Data Mode", ["Live Deriv Market History", "Monte Carlo SDE Simulation"], index=0)
         run_bt = st.button("🚀 Execute Backtest", type="primary")
@@ -1469,7 +1480,7 @@ with tabs[3]:
     kc1, kc2 = st.columns(2)
     with kc1:
         calc_symbol = st.selectbox("Market Specification", list(DERIV_SYNTHETIC_SPECS.keys()), index=0)
-        account_bal = st.number_input("Account Balance ($)", min_value=10.0, max_value=1000000.0, value=10000.0, step=100.0)
+        account_bal = st.number_input("Account Balance ($)", min_value=1.0, max_value=1000000.0, value=STARTING_CAPITAL, step=10.0)
         win_p = st.slider("Win Probability (p)", min_value=0.10, max_value=0.90, value=0.68, step=0.01)
         rr_ratio = st.slider("Payoff Ratio (b = R:R)", min_value=0.5, max_value=10.0, value=2.0, step=0.1)
 
@@ -1580,39 +1591,12 @@ with tabs[4]:
     # ── State Summary Metrics ──
     cur_data = storage.get_all_state()
     
-    # Auto-seed verification trade if both open and closed are completely empty
-    if not cur_data.get("open_trades") and not cur_data.get("closed_trades"):
-        try:
-            v75_df = get_deriv_live_candles("Volatility 75 Index", "M1", 5)
-            if v75_df is not None and len(v75_df) > 0:
-                seed_p = float(v75_df["close"].iloc[-1])
-                r_seed = seed_p * 0.008
-                seed_doc = {
-                    "ticket": "VERIFY-7501",
-                    "symbol": "Volatility 75 Index",
-                    "direction": "BUY",
-                    "volume": 0.005,
-                    "entry_price": seed_p,
-                    "stop_loss": round(seed_p - r_seed, 4),
-                    "take_profit": round(seed_p + 1.5 * r_seed, 4),
-                    "strategy_type": "LIVE_VERIFICATION_TEST",
-                    "math_edge_score": 85.0,
-                    "win_probability": 0.72,
-                    "kalman_confirmation": "CONFIRMS",
-                    "var_risk_level": "LOW",
-                    "opened_at": datetime.now(timezone.utc).isoformat(),
-                    "moved_to_be": False,
-                    "tp1_reached": False,
-                }
-                storage.save_open_trade("VERIFY-7501", seed_doc)
-                cur_data = storage.get_all_state()
-        except Exception:
-            pass
+
 
     open_pos = cur_data.get("open_trades", {})
     closed_pos = cur_data.get("closed_trades", [])
-    state_eq = float(cur_data.get("equity", 10000.0))
-    state_bal = float(cur_data.get("balance", 10000.0))
+    state_eq = float(cur_data.get("equity", STARTING_CAPITAL))
+    state_bal = float(cur_data.get("balance", STARTING_CAPITAL))
 
     # Pre-calculate live spot prices and real-time floating PnL across all active positions
     live_pos_data = {}
@@ -1647,7 +1631,7 @@ with tabs[4]:
         }
 
     live_equity = round(state_eq + total_floating_usd, 2)
-    net_total_pnl = round(live_equity - 10000.0, 2)
+    net_total_pnl = round(live_equity - STARTING_CAPITAL, 2)
 
     tm1, tm2, tm3, tm4 = st.columns(4)
     tm1.metric("Engine Mode", cur_data.get("mode", "LIVE_WEB"), "24/7 Autonomous" if is_bot_running else "Standby")
@@ -1797,9 +1781,35 @@ with tabs[4]:
         with wcol4:
             st.write("")
             if st.button("🧹 Reset History", key="reset_hist_btn", use_container_width=True):
-                storage.reset_history(10000.0, 10000.0)
+                storage.reset_history(STARTING_CAPITAL, STARTING_CAPITAL)
                 st.toast("Trade history reset.", icon="🧹")
                 time.sleep(0.3)
+                st.rerun()
+
+    # ── Full Account Reset (Change Starting Capital) ──
+    with st.expander("🔄 Full Account Reset (Change Starting Capital)", expanded=False):
+        st.caption("Close all open positions, wipe trade history, and set a new starting balance. Use this to switch between $5, $10, $50, etc.")
+        reset_col1, reset_col2 = st.columns([2, 1])
+        with reset_col1:
+            new_capital = st.number_input("New Starting Capital ($)", min_value=1.0, max_value=100000.0, value=STARTING_CAPITAL, step=5.0, key="new_cap_input")
+        with reset_col2:
+            st.write("")
+            st.write("")
+            if st.button("🔄 Full Reset & Restart", key="full_reset_btn", type="primary", use_container_width=True):
+                storage.full_reset(starting_equity=new_capital, starting_balance=new_capital)
+                # Update config file
+                try:
+                    import json as _jr
+                    cfg_path = ROOT / "config" / "config_synthetic.json"
+                    cfg = _jr.loads(cfg_path.read_text(encoding="utf-8")) if cfg_path.exists() else {}
+                    cfg["starting_balance"] = new_capital
+                    if "micro_account_notes" in cfg:
+                        cfg["micro_account_notes"]["starting_balance"] = new_capital
+                    cfg_path.write_text(_jr.dumps(cfg, indent=2), encoding="utf-8")
+                except Exception:
+                    pass
+                st.toast(f"🔄 Account reset to ${new_capital:,.2f}! All positions closed, history cleared.", icon="🔄")
+                time.sleep(0.5)
                 st.rerun()
 
         # Build clean structured table with explicit WIN / LOSS Outcome column

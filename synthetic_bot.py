@@ -440,8 +440,8 @@ def run_cloud_surveillance_loop(cfg: SyntheticBotConfig, logger: logging.Logger)
     storage = TradeStorageManager(state_file=state_path)
     init_state = storage.get_all_state()
     open_trades: Dict[str, Any] = init_state.get("open_trades", {})
-    equity = float(init_state.get("equity", 10000.0))
-    balance = float(init_state.get("balance", 10000.0))
+    equity = float(init_state.get("equity", 10.0))
+    balance = float(init_state.get("balance", 10.0))
 
     cycle_count = 0
     if notifier:

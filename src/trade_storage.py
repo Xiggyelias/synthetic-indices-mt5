@@ -341,6 +341,40 @@ class TradeStorageManager:
             except Exception as e:
                 logger.error("Failed to reset history in MongoDB: %s", e)
 
+    def full_reset(self, starting_equity: float = 10.0, starting_balance: float = 10.0) -> None:
+        """Full account reset: clear ALL trades (open + closed) and set starting capital."""
+        now_str = datetime.now(timezone.utc).isoformat()
+
+        # Wipe disk state completely
+        state = {
+            "open_trades": {},
+            "closed_trades": [],
+            "equity": round(starting_equity, 2),
+            "balance": round(starting_balance, 2),
+            "mode": "CLOUD_AUTONOMOUS_LIVE_WEB",
+            "updated_at": now_str,
+        }
+        self._save_disk_state(state)
+
+        # Wipe MongoDB
+        if self.is_connected and self.trades_col is not None and self.state_col is not None:
+            try:
+                self.trades_col.delete_many({})  # Delete ALL trades
+                self.state_col.update_one(
+                    {"_id": "portfolio_state"},
+                    {
+                        "$set": {
+                            "equity": round(starting_equity, 2),
+                            "balance": round(starting_balance, 2),
+                            "updated_at": now_str,
+                        }
+                    },
+                    upsert=True,
+                )
+                logger.info("🔄 Full account reset: $%.2f starting capital. All trades wiped.", starting_equity)
+            except Exception as e:
+                logger.error("Failed full reset in MongoDB: %s", e)
+
     def get_status_summary(self) -> Dict[str, Any]:
         """Diagnostics summary for dashboard display."""
         total_open = 0
