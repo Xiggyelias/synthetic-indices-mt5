@@ -1676,9 +1676,22 @@ with tabs[4]:
     # ── Closed Trades History ──
     if closed_pos:
         st.markdown("##### 📜 Closed Trades History")
-        h1, h2 = st.columns([3, 1])
-        with h2:
-            if st.button("🧹 Reset History", key="reset_hist_btn"):
+
+        # Performance summary metrics
+        wins = [t for t in closed_pos if float(t.get("pnl_usd", 0.0)) > 0 or "PROFIT" in str(t.get("close_reason", "")).upper()]
+        losses = [t for t in closed_pos if float(t.get("pnl_usd", 0.0)) < 0 or "STOP" in str(t.get("close_reason", "")).upper() or "LOSS" in str(t.get("close_reason", "")).upper()]
+        total_closed = len(closed_pos)
+        win_rate = (len(wins) / total_closed * 100.0) if total_closed > 0 else 0.0
+        tot_realized = sum(float(t.get("pnl_usd", 0.0)) for t in closed_pos)
+
+        wcol1, wcol2, wcol3, wcol4 = st.columns([1.5, 1.5, 1.5, 1])
+        wcol1.metric("Win Rate", f"{win_rate:.1f}%", f"{len(wins)} Wins / {len(losses)} Losses")
+        wcol2.metric("Total Realized P&L", f"${tot_realized:+,.2f}", f"{total_closed} Total Trades")
+        avg_w = (sum(float(t.get("pnl_usd", 0.0)) for t in wins) / len(wins)) if wins else 0.0
+        wcol3.metric("Avg Win", f"${avg_w:+,.2f}")
+        with wcol4:
+            st.write("")
+            if st.button("🧹 Reset History", key="reset_hist_btn", use_container_width=True):
                 cur_data["closed_trades"] = []
                 cur_data["equity"] = 10000.0
                 cur_data["balance"] = 10000.0
@@ -1686,8 +1699,61 @@ with tabs[4]:
                 st.toast("Trade history reset.", icon="🧹")
                 time.sleep(0.3)
                 st.rerun()
-        df_closed = pd.DataFrame(closed_pos)
-        st.dataframe(df_closed, height=300, use_container_width=True)
+
+        # Build clean structured table with explicit WIN / LOSS Outcome column
+        formatted_rows = []
+        for t in reversed(closed_pos):
+            pnl_usd = float(t.get("pnl_usd", 0.0))
+            pnl_r = float(t.get("pnl_r", 0.0))
+            reason = str(t.get("close_reason", "")).upper()
+
+            if pnl_usd > 0 or "PROFIT" in reason or "TP" in reason:
+                outcome = "🟢 WIN"
+            elif pnl_usd < 0 or "STOP" in reason or "LOSS" in reason or "SL" in reason:
+                outcome = "🔴 LOSS"
+            else:
+                outcome = "⚪ BREAKEVEN"
+
+            if "TAKE_PROFIT" in reason:
+                reason_clean = "🎯 TAKE PROFIT"
+            elif "STOP_LOSS" in reason:
+                reason_clean = "🛑 STOP LOSS"
+            elif "MANUAL" in reason:
+                reason_clean = "✋ MANUAL EXIT"
+            else:
+                reason_clean = reason or "CLOSED"
+
+            direction = t.get("direction", "BUY")
+            dir_label = "🟢 BUY" if direction == "BUY" else "🔴 SELL"
+
+            closed_at_raw = t.get("closed_at", "")
+            if closed_at_raw:
+                try:
+                    dt = datetime.fromisoformat(closed_at_raw)
+                    closed_at_str = dt.strftime("%Y-%m-%d %H:%M:%S")
+                except Exception:
+                    closed_at_str = closed_at_raw[:19]
+            else:
+                closed_at_str = "—"
+
+            formatted_rows.append({
+                "Outcome": outcome,
+                "PnL ($)": f"${pnl_usd:+,.2f}",
+                "PnL (R)": f"{pnl_r:+.2f}R",
+                "Reason": reason_clean,
+                "Symbol": t.get("symbol", "—"),
+                "Direction": dir_label,
+                "Volume": t.get("volume", 0.0),
+                "Entry Price": f"{float(t.get('entry_price', 0.0)):,.4f}",
+                "Exit Price": f"{float(t.get('exit_price', 0.0)):,.4f}",
+                "Strategy": t.get("strategy_type", "—"),
+                "Math Edge": f"{float(t.get('math_edge_score', 0.0)):.1f}/100",
+                "Win Prob": f"{float(t.get('win_probability', 0.5)):.0%}",
+                "Closed At": closed_at_str,
+            })
+
+        df_closed = pd.DataFrame(formatted_rows)
+        st.dataframe(df_closed, height=350, use_container_width=True)
 
 
 # TAB 6: System Logs
