@@ -8,6 +8,8 @@
     "Volatility 75 (1s) Index",
     "Volatility 50 Index",
     "Volatility 50 (1s) Index",
+    "Crash 300 Index",
+    "Boom 300 Index",
     "Step Index"
   ],
   "timeframe": "M5",
@@ -16,7 +18,7 @@
   "fast_poll_seconds": 4,
   "slow_poll_seconds": 15,
   "magic_number": 20260909,
-  "min_math_edge": 60.0,
+  "min_math_edge": 54.0,
   "calculative_brain": {
     "hurst_anti_persistent_threshold": 0.46,
     "hurst_persistent_threshold": 0.54,
@@ -37,13 +39,13 @@
     "max_risk_per_trade": 0.05,
     "max_open_trades": 5,
     "max_drawdown_limit": 0.25,
-    "be_trigger_r": 0.5,
+    "be_trigger_r": 0.65,
     "spike_harvest_r": 2.5,
     "var_emergency_threshold": 6.5,
     "kalman_trail_enable": true,
-    "profit_lock_r": 0.8,
-    "profit_lock_bank_r": 0.35,
-    "dynamic_tp_drawdown_r": 0.35
+    "profit_lock_r": 1.10,
+    "profit_lock_bank_r": 0.60,
+    "dynamic_tp_drawdown_r": 0.45
   },
   "micro_account_notes": {
     "starting_balance": 10.0,
@@ -52,7 +54,9 @@
     "tradeable_symbols": [
       "Volatility 75 Index",
       "Volatility 50 Index",
-      "Step Index"
+      "Crash 300 Index",
+    "Boom 300 Index",
+    "Step Index"
     ],
     "reason": "Only these 3 symbols have min lot sizes small enough for $5. V75 min=0.001, V50 min=0.001, Step min=0.10. Other instruments require minimum lots that would risk >100% of account.",
     "scaling_plan": "As balance grows past $50, unlock Crash 300 + Boom 300. Past $200, unlock all 14 instruments."

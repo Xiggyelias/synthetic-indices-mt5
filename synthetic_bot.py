@@ -532,25 +532,33 @@ def run_cloud_surveillance_loop(cfg: SyntheticBotConfig, logger: logging.Logger)
                             closed = True
                             reason = "STOP_LOSS" if not t.get("moved_to_be") else "TRAILING_STOP"
                             exit_price = sl_p
-                        # 3. Dynamic Take Profit: if trade was up >= 0.8R and retraces by 0.35R from peak, lock in win!
-                        elif peak_r >= 0.8 and (peak_r - curr_r) >= 0.35:
+                        # 3. Dynamic Take Profit: bank profit when trade achieved >= 1.5R peak and retraces by >= 0.45R (locking in >= +1.05R banked)
+                        elif peak_r >= 1.5 and (peak_r - curr_r) >= 0.45:
                             closed = True
                             reason = "DYNAMIC_TAKE_PROFIT"
                             exit_price = curr_p
-                        # 4. Trailing Profit Lock at +0.8R: guarantee +0.35R profit
-                        elif (curr_p >= entry_p + 0.8 * r_dist or high_p >= entry_p + 0.8 * r_dist):
-                            lock_sl = round(entry_p + 0.35 * r_dist, 5)
+                        # 4. Dynamic Runner Trailing at +1.6R and beyond: trail SL dynamically at peak_r - 0.45R
+                        elif peak_r >= 1.6:
+                            trail_sl = round(entry_p + (peak_r - 0.45) * r_dist, 5)
+                            if sl_p < trail_sl:
+                                t["stop_loss"] = trail_sl
+                                t["moved_to_be"] = True
+                                storage.save_open_trade(ticket, t)
+                                logger.info("🚀 [RUNNER TRAIL] Ticket %s trailed SL to +%.2fR @ %.5f", ticket, peak_r - 0.45, trail_sl)
+                        # 5. Guaranteed Profit Lock at +1.1R: guarantee +0.60R cash
+                        elif (curr_p >= entry_p + 1.1 * r_dist or high_p >= entry_p + 1.1 * r_dist):
+                            lock_sl = round(entry_p + 0.60 * r_dist, 5)
                             if sl_p < lock_sl:
                                 t["stop_loss"] = lock_sl
                                 t["moved_to_be"] = True
                                 storage.save_open_trade(ticket, t)
-                                logger.info("💰 [PROFIT LOCK] Ticket %s locked +0.35R profit @ %.5f", ticket, lock_sl)
-                        # 5. Fast Breakeven Lock at +0.5R: move SL to entry price
-                        elif (curr_p >= entry_p + 0.5 * r_dist or high_p >= entry_p + 0.5 * r_dist) and not t.get("moved_to_be"):
-                            t["stop_loss"] = entry_p
+                                logger.info("💰 [PROFIT LOCK] Ticket %s locked +0.60R profit @ %.5f", ticket, lock_sl)
+                        # 6. Fast Risk Neutralization at +0.65R: move SL to entry + 0.05R buffer
+                        elif (curr_p >= entry_p + 0.65 * r_dist or high_p >= entry_p + 0.65 * r_dist) and not t.get("moved_to_be"):
+                            t["stop_loss"] = round(entry_p + 0.05 * r_dist, 5)
                             t["moved_to_be"] = True
                             storage.save_open_trade(ticket, t)
-                            logger.info("🛡️ [BE LOCK] Ticket %s moved to Breakeven @ %.5f (+0.5R trigger)", ticket, entry_p)
+                            logger.info("🛡️ [BE LOCK] Ticket %s moved to Breakeven+buffer @ %.5f (+0.65R trigger)", ticket, t["stop_loss"])
                     else:
                         # SELL DIRECTION
                         # 1. Full Take Profit hit
@@ -563,25 +571,33 @@ def run_cloud_surveillance_loop(cfg: SyntheticBotConfig, logger: logging.Logger)
                             closed = True
                             reason = "STOP_LOSS" if not t.get("moved_to_be") else "TRAILING_STOP"
                             exit_price = sl_p
-                        # 3. Dynamic Take Profit: if trade was up >= 0.8R and retraces by 0.35R from peak, lock in win!
-                        elif peak_r >= 0.8 and (peak_r - curr_r) >= 0.35:
+                        # 3. Dynamic Take Profit: bank profit when trade achieved >= 1.5R peak and retraces by >= 0.45R (locking in >= +1.05R banked)
+                        elif peak_r >= 1.5 and (peak_r - curr_r) >= 0.45:
                             closed = True
                             reason = "DYNAMIC_TAKE_PROFIT"
                             exit_price = curr_p
-                        # 4. Trailing Profit Lock at +0.8R: guarantee +0.35R profit
-                        elif (curr_p <= entry_p - 0.8 * r_dist or low_p <= entry_p - 0.8 * r_dist):
-                            lock_sl = round(entry_p - 0.35 * r_dist, 5)
+                        # 4. Dynamic Runner Trailing at +1.6R and beyond: trail SL dynamically at peak_r - 0.45R
+                        elif peak_r >= 1.6:
+                            trail_sl = round(entry_p - (peak_r - 0.45) * r_dist, 5)
+                            if sl_p > trail_sl:
+                                t["stop_loss"] = trail_sl
+                                t["moved_to_be"] = True
+                                storage.save_open_trade(ticket, t)
+                                logger.info("🚀 [RUNNER TRAIL] Ticket %s trailed SL to +%.2fR @ %.5f", ticket, peak_r - 0.45, trail_sl)
+                        # 5. Guaranteed Profit Lock at +1.1R: guarantee +0.60R cash
+                        elif (curr_p <= entry_p - 1.1 * r_dist or low_p <= entry_p - 1.1 * r_dist):
+                            lock_sl = round(entry_p - 0.60 * r_dist, 5)
                             if sl_p > lock_sl:
                                 t["stop_loss"] = lock_sl
                                 t["moved_to_be"] = True
                                 storage.save_open_trade(ticket, t)
-                                logger.info("💰 [PROFIT LOCK] Ticket %s locked +0.35R profit @ %.5f", ticket, lock_sl)
-                        # 5. Fast Breakeven Lock at +0.5R: move SL to entry price
-                        elif (curr_p <= entry_p - 0.5 * r_dist or low_p <= entry_p - 0.5 * r_dist) and not t.get("moved_to_be"):
-                            t["stop_loss"] = entry_p
+                                logger.info("💰 [PROFIT LOCK] Ticket %s locked +0.60R profit @ %.5f", ticket, lock_sl)
+                        # 6. Fast Risk Neutralization at +0.65R: move SL to entry - 0.05R buffer
+                        elif (curr_p <= entry_p - 0.65 * r_dist or low_p <= entry_p - 0.65 * r_dist) and not t.get("moved_to_be"):
+                            t["stop_loss"] = round(entry_p - 0.05 * r_dist, 5)
                             t["moved_to_be"] = True
                             storage.save_open_trade(ticket, t)
-                            logger.info("🛡️ [BE LOCK] Ticket %s moved to Breakeven @ %.5f (+0.5R trigger)", ticket, entry_p)
+                            logger.info("🛡️ [BE LOCK] Ticket %s moved to Breakeven+buffer @ %.5f (+0.65R trigger)", ticket, t["stop_loss"])
 
                     if closed:
                         pnl_points = (exit_price - entry_p) if direction == "BUY" else (entry_p - exit_price)
@@ -602,8 +618,15 @@ def run_cloud_surveillance_loop(cfg: SyntheticBotConfig, logger: logging.Logger)
                         logger.info("🏁 [TRADE CLOSED] #%s %s %s -> %s | PnL: %+.2fR ($%+.2f) | Equity: $%.2f",
                                     ticket, direction, sym, reason, pnl_r, pnl_usd, equity)
 
-                # 3. Quantitative Signal Evaluation
+                # 3. Quantitative Signal Evaluation (Primary M5 with M1 Multi-Timeframe Scan)
                 signal = strategy.evaluate(df, symbol=sym, account_balance=equity, timeframe=cfg.timeframe)
+                if not signal or not signal.sizing or not signal.sizing.is_valid:
+                    # Multi-Timeframe High-Yield Scan: evaluate M1 for rapid micro-scalps
+                    df_m1 = get_deriv_live_candles(sym, "M1", cfg.lookback_bars)
+                    if df_m1 is not None and len(df_m1) >= 40:
+                        m1_signal = strategy.evaluate(df_m1, symbol=sym, account_balance=equity, timeframe="M1")
+                        if m1_signal and m1_signal.sizing and m1_signal.sizing.is_valid and m1_signal.calculated_win_prob >= 0.58:
+                            signal = m1_signal
                 if signal and signal.sizing and signal.sizing.is_valid:
                     # STRICT RULE 1: Maximum 1 open position per symbol! Never stack duplicate trades on the same market
                     existing_sym_trades = [t for t in open_trades.values() if t.get("symbol") == signal.symbol]

@@ -29,8 +29,14 @@ DERIV_SYNTHETIC_SPECS: Dict[str, Dict[str, float]] = {
     "R_25":                     {"min_lot": 0.50,  "max_lot": 100.0, "step": 0.01, "point": 0.001},
     "VOLATILITY 50 INDEX":       {"min_lot": 0.001, "max_lot": 50.0, "step": 0.001, "point": 0.0001},
     "R_50":                     {"min_lot": 0.001, "max_lot": 50.0, "step": 0.001, "point": 0.0001},
+    "VOLATILITY 50 (1S) INDEX":  {"min_lot": 0.005, "max_lot": 20.0, "step": 0.001, "point": 0.01},
+    "1HZ50V":                   {"min_lot": 0.005, "max_lot": 20.0, "step": 0.001, "point": 0.01},
+    "VOLATILITY 25 (1S) INDEX":  {"min_lot": 0.005, "max_lot": 20.0, "step": 0.001, "point": 0.01},
+    "1HZ25V":                   {"min_lot": 0.005, "max_lot": 20.0, "step": 0.001, "point": 0.01},
     "VOLATILITY 10 INDEX":       {"min_lot": 0.20,  "max_lot": 100.0, "step": 0.01, "point": 0.001},
     "R_10":                     {"min_lot": 0.20,  "max_lot": 100.0, "step": 0.01, "point": 0.001},
+    "VOLATILITY 10 (1S) INDEX":  {"min_lot": 0.20,  "max_lot": 100.0, "step": 0.01, "point": 0.01},
+    "1HZ10V":                   {"min_lot": 0.20,  "max_lot": 100.0, "step": 0.01, "point": 0.01},
     "CRASH 1000 INDEX":         {"min_lot": 0.20,  "max_lot": 50.0, "step": 0.01,  "point": 0.001},
     "CRASH_1000":               {"min_lot": 0.20,  "max_lot": 50.0, "step": 0.01,  "point": 0.001},
     "BOOM 1000 INDEX":          {"min_lot": 0.20,  "max_lot": 50.0, "step": 0.01,  "point": 0.001},
@@ -41,8 +47,10 @@ DERIV_SYNTHETIC_SPECS: Dict[str, Dict[str, float]] = {
     "BOOM_500":                 {"min_lot": 0.20,  "max_lot": 50.0, "step": 0.01,  "point": 0.001},
     "CRASH 300 INDEX":          {"min_lot": 0.10,  "max_lot": 30.0, "step": 0.01,  "point": 0.001},
     "CRASH_300":                {"min_lot": 0.10,  "max_lot": 30.0, "step": 0.01,  "point": 0.001},
+    "CRASH300N":                {"min_lot": 0.10,  "max_lot": 30.0, "step": 0.01,  "point": 0.001},
     "BOOM 300 INDEX":           {"min_lot": 0.10,  "max_lot": 30.0, "step": 0.01,  "point": 0.001},
     "BOOM_300":                 {"min_lot": 0.10,  "max_lot": 30.0, "step": 0.01,  "point": 0.001},
+    "BOOM300N":                 {"min_lot": 0.10,  "max_lot": 30.0, "step": 0.01,  "point": 0.001},
     "STEP INDEX":               {"min_lot": 0.10,  "max_lot": 100.0, "step": 0.01, "point": 0.1},
 }
 
@@ -227,7 +235,7 @@ class SyntheticRiskManager:
         # on micro accounts (<= $50), allow a buffer (up to 1.8x cap) for broker minimum lots
         # while strictly refusing catastrophic exposures (>12% / 40%).
         risk_cap = (
-            self.max_risk_pct * 1.8
+            self.max_risk_pct * 2.5
             if (account_balance <= 50.0 and volume <= min_vol * 1.0001)
             else self.max_risk_pct
         )
