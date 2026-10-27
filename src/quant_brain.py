@@ -1044,6 +1044,32 @@ class CalculativeBrain:
             )
         return None
 
+    @staticmethod
+    def _kalman_plan(price: float, kalman: KalmanFilterResult, gk_vol: float) -> Optional[_TradePlan]:
+        z = kalman.zscore
+        if abs(z) < 1.3:
+            return None
+        fair = kalman.fair_value
+        direction = "SELL" if z > 0 else "BUY"
+        target_dist = abs(price - fair)
+        if target_dist <= 0:
+            return None
+        stop_dist = max(target_dist * 1.25, price * gk_vol * 1.25)
+        stop = price + stop_dist if direction == "SELL" else price - stop_dist
+        target = fair
+        target_2 = fair - (0.5 * target_dist) if direction == "SELL" else fair + (0.5 * target_dist)
+        win_prob = float(np.clip(0.55 + 0.15 * math.tanh(abs(z) - 1.0), 0.55, 0.78))
+        return _TradePlan(
+            direction=direction,
+            archetype="KALMAN_FAIR_VALUE_REVERSION",
+            target=target,
+            target_2=target_2,
+            stop=stop,
+            win_prob=win_prob,
+            horizon_bars=8,
+            loss_r=1.0,
+        )
+
     # ── Main entry point ──────────────────────────────────────────────────────
 
     def analyze(self, df: pd.DataFrame, symbol: str, timeframe: str = "M5", spread: float = 0.0) -> QuantBrainAnalysis:
@@ -1098,6 +1124,8 @@ class CalculativeBrain:
                 plan = self._ou_plan(price, ou)
             if plan is None and hurst.regime == "PERSISTENT" and entropy.is_ordered:
                 plan = self._momentum_plan(df, price, gk_vol)
+            if plan is None and abs(kalman.zscore) >= 1.3:
+                plan = self._kalman_plan(price, kalman, gk_vol)
 
         confluence = compute_multi_scale_confluence(df, factor=3, direction=plan.direction if plan else None)
 

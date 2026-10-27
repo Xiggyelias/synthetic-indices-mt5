@@ -788,6 +788,7 @@ def archetype_badge(archetype: str) -> str:
         "OU_MEAN_REVERSION": ("arch-ou", "🔄 O-U REVERSION"),
         "FRACTAL_MOMENTUM": ("arch-fractal", "📐 FRACTAL MOMENTUM"),
         "BERNOULLI_STEP_SCALP": ("arch-step", "🎲 STEP SCALP"),
+        "KALMAN_FAIR_VALUE_REVERSION": ("arch-ou", "🎯 KALMAN REVERSION"),
     }
     cls, label = arch_map.get(archetype, ("arch-default", archetype))
     return f'<span class="archetype-badge {cls}">{label}</span>'

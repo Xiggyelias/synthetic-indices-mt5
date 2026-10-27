@@ -89,6 +89,9 @@ def _rationale(a: QuantBrainAnalysis, kalman: str, var_level: str, rr: float) ->
         s = a.step_analysis
         head = (f"Step alternation. Runs Z={s.runs_zscore:+.2f}, last move {s.current_streak_direction}, "
                 f"P(continue)={s.streak_continuation_prob:.0%}.")
+    elif arch == "KALMAN_FAIR_VALUE_REVERSION":
+        head = (f"Kalman fair value reversion. Deviation Z={a.kalman_zscore:+.2f}σ, "
+                f"Fair={a.kalman_fair_value:.4f}.")
     elif a.poisson is not None:
         ph = a.poisson
         head = (f"{arch.replace('_', ' ').title()}. Spikes/bar={ph.base_rate:.3f}, "
@@ -105,7 +108,7 @@ class SyntheticStrategy:
         self,
         brain: Optional[CalculativeBrain] = None,
         risk_manager: Optional[SyntheticRiskManager] = None,
-        min_math_edge_score: float = 65.0,
+        min_math_edge_score: float = 52.0,
         kalman_confirm_threshold: float = 0.8,
         kalman_veto_contradictions: bool = True,
     ):
