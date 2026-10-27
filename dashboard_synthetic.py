@@ -1538,7 +1538,7 @@ with tabs[4]:
         clean_symbols = [
             "Volatility 75 Index", "Volatility 75 (1s) Index", "Volatility 100 Index", 
             "Volatility 100 (1s) Index", "Volatility 50 Index", "Volatility 50 (1s) Index",
-            "Volatility 25 Index", "Volatility 10 Index", "Crash 1000 Index", "Crash 500 Index",
+            "Volatility 10 Index", "Crash 1000 Index", "Crash 500 Index",
             "Crash 300 Index", "Boom 1000 Index", "Boom 500 Index", "Boom 300 Index", "Step Index"
         ]
         tc1, tc2, tc3, tc4 = st.columns([2, 1, 1, 2])

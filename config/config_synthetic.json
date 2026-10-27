@@ -9,7 +9,6 @@
     "Volatility 100 Index",
     "Volatility 100 (1s) Index",
     "Volatility 50 Index",
-    "Volatility 25 Index",
     "Volatility 10 Index",
     "Crash 1000 Index",
     "Crash 500 Index",
@@ -43,13 +42,16 @@
   "risk_management": {
     "aggressive_mode": true,
     "fractional_kelly_multiplier": 0.5,
-    "max_risk_per_trade": 0.065,
+    "max_risk_per_trade": 0.05,
     "max_open_trades": 5,
     "max_drawdown_limit": 0.25,
-    "be_trigger_r": 0.9,
+    "be_trigger_r": 0.5,
     "spike_harvest_r": 2.5,
     "var_emergency_threshold": 6.5,
-    "kalman_trail_enable": true
+    "kalman_trail_enable": true,
+    "profit_lock_r": 0.8,
+    "profit_lock_bank_r": 0.35,
+    "dynamic_tp_drawdown_r": 0.35
   },
   "micro_account_notes": {
     "starting_balance": 10.0,

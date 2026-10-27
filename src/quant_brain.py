@@ -1054,15 +1054,16 @@ class CalculativeBrain:
         raw_target = abs(price - fair)
         if raw_target <= 0:
             return None
-        # Volatility-buffered stop loss: at least 2.0x GK vol and 0.8% price buffer
-        # This prevents market noise / spread from prematurely stopping out trades
-        min_buffer = price * 0.008
-        stop_dist = max(raw_target * 1.5, price * gk_vol * 2.0, min_buffer)
+        # Disciplined, volatility-scaled stop loss: 0.75x target or 1.2x GK vol
+        # Capped to 0.35% of price to prevent outsized drawdowns, with 0.08% spread floor
+        stop_dist = max(raw_target * 0.75, price * gk_vol * 1.2)
+        stop_dist = min(stop_dist, price * 0.0035)
+        stop_dist = max(stop_dist, price * 0.0008)
         stop = price + stop_dist if direction == "SELL" else price - stop_dist
-        # Target fair value with healthy minimum 1.2R reward
-        target_dist = max(raw_target, stop_dist * 1.2)
+        # High-probability target at fair value with healthy minimum 1.25R reward
+        target_dist = max(raw_target, stop_dist * 1.25)
         target = price - target_dist if direction == "SELL" else price + target_dist
-        target_2 = price - target_dist * 1.8 if direction == "SELL" else price + target_dist * 1.8
+        target_2 = price - target_dist * 1.5 if direction == "SELL" else price + target_dist * 1.5
         win_prob = float(np.clip(0.60 + 0.12 * math.tanh(abs(z) - 1.0), 0.60, 0.78))
         return _TradePlan(
             direction=direction,

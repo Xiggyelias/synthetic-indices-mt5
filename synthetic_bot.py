@@ -458,6 +458,17 @@ def run_cloud_surveillance_loop(cfg: SyntheticBotConfig, logger: logging.Logger)
             # Real-time state synchronization with MongoDB / Dashboard
             live_state = storage.get_all_state()
             open_trades = live_state.get("open_trades", {})
+
+            # Clean up any open trades whose symbol is no longer in active_symbols
+            for d_ticket in list(open_trades.keys()):
+                d_t = open_trades.get(d_ticket)
+                if d_t and d_t.get("symbol") not in cfg.symbols:
+                    sym_del = d_t.get("symbol", "")
+                    entry_p_del = float(d_t.get("entry_price", 0.0))
+                    storage.close_trade(d_ticket, exit_price=entry_p_del, pnl_usd=0.0, pnl_r=0.0, close_reason="DECOMMISSIONED_SYMBOL_REMOVED")
+                    if d_ticket in open_trades:
+                        del open_trades[d_ticket]
+                    logger.info("🗑️ [CLEANUP] Closed position #%s on removed symbol '%s'", d_ticket, sym_del)
             equity = float(live_state.get("equity", equity))
             balance = float(live_state.get("balance", balance))
             for sym in cfg.symbols:
@@ -487,34 +498,74 @@ def run_cloud_surveillance_loop(cfg: SyntheticBotConfig, logger: logging.Logger)
                     reason = ""
                     exit_price = curr_p
 
+                    # Peak R tracking for dynamic TP and trailing profit lock
+                    curr_pts = (curr_p - entry_p) if direction == "BUY" else (entry_p - curr_p)
+                    high_pts = (high_p - entry_p) if direction == "BUY" else (entry_p - low_p)
+                    curr_r = curr_pts / r_dist
+                    peak_r = max(float(t.get("peak_r", 0.0)), round(high_pts / r_dist, 2))
+                    t["peak_r"] = peak_r
+
                     if direction == "BUY":
+                        # 1. Full Take Profit hit
                         if curr_p >= tp_p or high_p >= tp_p:
                             closed = True
                             reason = "TAKE_PROFIT"
                             exit_price = tp_p
+                        # 2. Stop Loss hit
                         elif curr_p <= sl_p or low_p <= sl_p:
                             closed = True
-                            reason = "STOP_LOSS"
+                            reason = "STOP_LOSS" if not t.get("moved_to_be") else "TRAILING_STOP"
                             exit_price = sl_p
-                        elif (curr_p >= entry_p + r_dist or high_p >= entry_p + r_dist) and not t.get("moved_to_be"):
+                        # 3. Dynamic Take Profit: if trade was up >= 0.8R and retraces by 0.35R from peak, lock in win!
+                        elif peak_r >= 0.8 and (peak_r - curr_r) >= 0.35:
+                            closed = True
+                            reason = "DYNAMIC_TAKE_PROFIT"
+                            exit_price = curr_p
+                        # 4. Trailing Profit Lock at +0.8R: guarantee +0.35R profit
+                        elif (curr_p >= entry_p + 0.8 * r_dist or high_p >= entry_p + 0.8 * r_dist):
+                            lock_sl = round(entry_p + 0.35 * r_dist, 5)
+                            if sl_p < lock_sl:
+                                t["stop_loss"] = lock_sl
+                                t["moved_to_be"] = True
+                                storage.save_open_trade(ticket, t)
+                                logger.info("💰 [PROFIT LOCK] Ticket %s locked +0.35R profit @ %.5f", ticket, lock_sl)
+                        # 5. Fast Breakeven Lock at +0.5R: move SL to entry price
+                        elif (curr_p >= entry_p + 0.5 * r_dist or high_p >= entry_p + 0.5 * r_dist) and not t.get("moved_to_be"):
                             t["stop_loss"] = entry_p
                             t["moved_to_be"] = True
                             storage.save_open_trade(ticket, t)
-                            logger.info("🛡️ [BE LOCK] Ticket %s moved to Breakeven @ %.5f", ticket, entry_p)
+                            logger.info("🛡️ [BE LOCK] Ticket %s moved to Breakeven @ %.5f (+0.5R trigger)", ticket, entry_p)
                     else:
+                        # SELL DIRECTION
+                        # 1. Full Take Profit hit
                         if curr_p <= tp_p or low_p <= tp_p:
                             closed = True
                             reason = "TAKE_PROFIT"
                             exit_price = tp_p
+                        # 2. Stop Loss hit
                         elif curr_p >= sl_p or high_p >= sl_p:
                             closed = True
-                            reason = "STOP_LOSS"
+                            reason = "STOP_LOSS" if not t.get("moved_to_be") else "TRAILING_STOP"
                             exit_price = sl_p
-                        elif (curr_p <= entry_p - r_dist or low_p <= entry_p - r_dist) and not t.get("moved_to_be"):
+                        # 3. Dynamic Take Profit: if trade was up >= 0.8R and retraces by 0.35R from peak, lock in win!
+                        elif peak_r >= 0.8 and (peak_r - curr_r) >= 0.35:
+                            closed = True
+                            reason = "DYNAMIC_TAKE_PROFIT"
+                            exit_price = curr_p
+                        # 4. Trailing Profit Lock at +0.8R: guarantee +0.35R profit
+                        elif (curr_p <= entry_p - 0.8 * r_dist or low_p <= entry_p - 0.8 * r_dist):
+                            lock_sl = round(entry_p - 0.35 * r_dist, 5)
+                            if sl_p > lock_sl:
+                                t["stop_loss"] = lock_sl
+                                t["moved_to_be"] = True
+                                storage.save_open_trade(ticket, t)
+                                logger.info("💰 [PROFIT LOCK] Ticket %s locked +0.35R profit @ %.5f", ticket, lock_sl)
+                        # 5. Fast Breakeven Lock at +0.5R: move SL to entry price
+                        elif (curr_p <= entry_p - 0.5 * r_dist or low_p <= entry_p - 0.5 * r_dist) and not t.get("moved_to_be"):
                             t["stop_loss"] = entry_p
                             t["moved_to_be"] = True
                             storage.save_open_trade(ticket, t)
-                            logger.info("🛡️ [BE LOCK] Ticket %s moved to Breakeven @ %.5f", ticket, entry_p)
+                            logger.info("🛡️ [BE LOCK] Ticket %s moved to Breakeven @ %.5f (+0.5R trigger)", ticket, entry_p)
 
                     if closed:
                         pnl_points = (exit_price - entry_p) if direction == "BUY" else (entry_p - exit_price)
