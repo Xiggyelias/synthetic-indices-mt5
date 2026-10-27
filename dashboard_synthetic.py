@@ -1443,7 +1443,15 @@ with tabs[2]:
 
         if rep.trades:
             st.markdown("##### Trade Journal")
-            df_trades = pd.DataFrame(rep.trades)
+            trades_formatted = []
+            for tr in rep.trades:
+                p_dol = float(tr.get("pnl_dollars", 0.0))
+                wl = "🟢 WIN" if p_dol > 0 else ("🔴 LOSS" if p_dol < 0 else "⚪ BREAKEVEN")
+                trades_formatted.append({
+                    "Win / Loss": wl,
+                    **tr
+                })
+            df_trades = pd.DataFrame(trades_formatted)
             st.dataframe(df_trades, height=300)
 
 
@@ -1642,17 +1650,27 @@ with tabs[4]:
     # ── Active Positions Spreadsheet Matrix ──
     st.markdown("##### 📂 Active Open Positions (Live Real-Time)")
     if open_pos:
-        # Build clean spreadsheet DataFrame with real-time live prices and floating PnL
+        # Build clean spreadsheet DataFrame with real-time live prices, floating PnL, and explicit Win/Loss status
         open_rows = []
         for ticket, t in live_pos_data.items():
+            pnl_u = float(t.get("pnl_usd", 0.0))
+            pnl_r_val = float(t.get("pnl_r", 0.0))
+            if pnl_u > 0:
+                wl_status = "🟢 WIN"
+            elif pnl_u < 0:
+                wl_status = "🔴 LOSS"
+            else:
+                wl_status = "⚪ BREAKEVEN"
+
             open_rows.append({
                 "symbol": t.get("symbol", "—"),
                 "direction": t.get("direction", "BUY"),
+                "win_or_loss": wl_status,
+                "floating_pnl": f"${pnl_u:+,.2f}",
+                "yield_r": f"{pnl_r_val:+.2f}R",
                 "volume": t.get("volume", 0.0),
                 "entry_price": round(float(t.get("entry_price", 0.0)), 4),
                 "live_price": round(float(t.get("live_price", 0.0)), 4),
-                "floating_pnl": f"${t.get('pnl_usd', 0.0):+,.2f}",
-                "yield_r": f"{t.get('pnl_r', 0.0):+.2f}R",
                 "stop_loss": round(float(t.get("stop_loss", 0.0)), 4),
                 "take_profit": round(float(t.get("take_profit", 0.0)), 4),
                 "strategy_type": t.get("strategy_type", "—"),
@@ -1741,7 +1759,8 @@ with tabs[4]:
                         st.markdown(f"**Live:** `{cur_p:,.4f}`")
                         st.caption(f"TP: `{tp_p:,.4f}`")
                     with pcol4:
-                        st.markdown(f"<span style='color:{pnl_color}; font-size:16px; font-weight:800;'>${pnl_usd:+,.2f} USD</span>", unsafe_allow_html=True)
+                        wl_card = "🟢 WIN" if pnl_usd > 0 else ("🔴 LOSS" if pnl_usd < 0 else "⚪ BREAKEVEN")
+                        st.markdown(f"<span style='color:{pnl_color}; font-size:16px; font-weight:800;'>${pnl_usd:+,.2f} USD</span> &nbsp;<b>{wl_card}</b>", unsafe_allow_html=True)
                         st.caption(f"Yield: **{pnl_r:+.2f}R**")
                     with pcol5:
                         be_txt = "✅ Locked" if t.get("moved_to_be") else "⏳ Trailing"
@@ -1823,7 +1842,7 @@ with tabs[4]:
                 closed_at_str = "—"
 
             formatted_rows.append({
-                "Outcome": outcome,
+                "Win / Loss": outcome,
                 "PnL ($)": f"${pnl_usd:+,.2f}",
                 "PnL (R)": f"{pnl_r:+.2f}R",
                 "Reason": reason_clean,
