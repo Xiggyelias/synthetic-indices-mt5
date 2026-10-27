@@ -1627,7 +1627,7 @@ with tabs[4]:
             pnl_pts = (cur_p - entry_p) if direction == "BUY" else (entry_p - cur_p)
             r_dist = max(abs(entry_p - sl_p), 1e-4)
             pnl_r = pnl_pts / r_dist
-            pnl_usd = pnl_pts * vol * 10.0
+            pnl_usd = pnl_pts * vol
 
             pnl_color = "#3fb950" if pnl_usd >= 0 else "#f85149"
 

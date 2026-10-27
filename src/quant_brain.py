@@ -1047,18 +1047,23 @@ class CalculativeBrain:
     @staticmethod
     def _kalman_plan(price: float, kalman: KalmanFilterResult, gk_vol: float) -> Optional[_TradePlan]:
         z = kalman.zscore
-        if abs(z) < 1.3:
+        if abs(z) < 2.0:
             return None
         fair = kalman.fair_value
         direction = "SELL" if z > 0 else "BUY"
-        target_dist = abs(price - fair)
-        if target_dist <= 0:
+        raw_target = abs(price - fair)
+        if raw_target <= 0:
             return None
-        stop_dist = max(target_dist * 1.25, price * gk_vol * 1.25)
+        # Volatility-buffered stop loss: at least 2.0x GK vol and 0.8% price buffer
+        # This prevents market noise / spread from prematurely stopping out trades
+        min_buffer = price * 0.008
+        stop_dist = max(raw_target * 1.5, price * gk_vol * 2.0, min_buffer)
         stop = price + stop_dist if direction == "SELL" else price - stop_dist
-        target = fair
-        target_2 = fair - (0.5 * target_dist) if direction == "SELL" else fair + (0.5 * target_dist)
-        win_prob = float(np.clip(0.55 + 0.15 * math.tanh(abs(z) - 1.0), 0.55, 0.78))
+        # Target fair value with healthy minimum 1.2R reward
+        target_dist = max(raw_target, stop_dist * 1.2)
+        target = price - target_dist if direction == "SELL" else price + target_dist
+        target_2 = price - target_dist * 1.8 if direction == "SELL" else price + target_dist * 1.8
+        win_prob = float(np.clip(0.60 + 0.12 * math.tanh(abs(z) - 1.0), 0.60, 0.78))
         return _TradePlan(
             direction=direction,
             archetype="KALMAN_FAIR_VALUE_REVERSION",
@@ -1066,7 +1071,7 @@ class CalculativeBrain:
             target_2=target_2,
             stop=stop,
             win_prob=win_prob,
-            horizon_bars=8,
+            horizon_bars=12,
             loss_r=1.0,
         )
 
@@ -1124,7 +1129,7 @@ class CalculativeBrain:
                 plan = self._ou_plan(price, ou)
             if plan is None and hurst.regime == "PERSISTENT" and entropy.is_ordered:
                 plan = self._momentum_plan(df, price, gk_vol)
-            if plan is None and abs(kalman.zscore) >= 1.3:
+            if plan is None and abs(kalman.zscore) >= 2.0:
                 plan = self._kalman_plan(price, kalman, gk_vol)
 
         confluence = compute_multi_scale_confluence(df, factor=3, direction=plan.direction if plan else None)

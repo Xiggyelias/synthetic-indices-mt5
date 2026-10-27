@@ -496,7 +496,7 @@ def run_cloud_surveillance_loop(cfg: SyntheticBotConfig, logger: logging.Logger)
                     if closed:
                         pnl_points = (exit_price - entry_p) if direction == "BUY" else (entry_p - exit_price)
                         pnl_r = round(pnl_points / r_dist, 2)
-                        pnl_usd = round(pnl_points * vol * 10.0, 2)
+                        pnl_usd = round(pnl_points * vol, 2)
                         equity = round(equity + pnl_usd, 2)
                         balance = round(balance + pnl_usd, 2)
 
