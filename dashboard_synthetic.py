@@ -703,6 +703,9 @@ def sync_market_stream(sym: str, tf: str, count: int) -> bool:
     try:
         from deriv_web_feed import get_deriv_live_candles
         fresh = get_deriv_live_candles(sym, tf, count)
+        if fresh is None or len(fresh) < 30:
+            time.sleep(0.2)
+            fresh = get_deriv_live_candles(sym, tf, count)
         if fresh is not None and len(fresh) >= 30:
             st.session_state["forced_fresh_df"] = fresh
             return True

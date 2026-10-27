@@ -414,8 +414,27 @@ def run_cloud_surveillance_loop(cfg: SyntheticBotConfig, logger: logging.Logger)
     state_path = Path(cfg.state_path)
     state_path.parent.mkdir(parents=True, exist_ok=True)
 
+    import psutil
+    stop_flag = ROOT / "data" / "engine_manual_stop.flag"
+
+    # Guard against multiple engine instances running concurrently
     pid_file = ROOT / "data" / "synthetic_bot.pid"
     pid_file.parent.mkdir(parents=True, exist_ok=True)
+    if pid_file.exists():
+        try:
+            old_pid = int(pid_file.read_text(encoding="utf-8").strip())
+            if old_pid != os.getpid() and psutil.pid_exists(old_pid):
+                try:
+                    old_proc = psutil.Process(old_pid)
+                    old_cmd = " ".join(old_proc.cmdline()).lower()
+                    if "synthetic_bot.py" in old_cmd:
+                        logger.warning("⚠️ Another QUANTA-SYNTH instance (PID %d) is already active. Exiting duplicate process.", old_pid)
+                        return 0
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    pass
+        except Exception:
+            pass
+
     pid_file.write_text(str(os.getpid()), encoding="utf-8")
 
     storage = TradeStorageManager(state_file=state_path)
@@ -432,6 +451,9 @@ def run_cloud_surveillance_loop(cfg: SyntheticBotConfig, logger: logging.Logger)
 
     try:
         while True:
+            if stop_flag.exists():
+                logger.info("🛑 [MANUAL STOP] engine_manual_stop.flag detected. Shutting down surveillance engine cleanly.")
+                break
             cycle_count += 1
             # Real-time state synchronization with MongoDB / Dashboard
             live_state = storage.get_all_state()

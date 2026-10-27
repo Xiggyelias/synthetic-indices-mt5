@@ -220,11 +220,18 @@ class SyntheticRiskManager:
         value_per_price_unit = tick_value / tick_size if tick_size > 0 and tick_value > 0 else 1.0
         risk_per_lot = price_risk * value_per_price_unit
 
+        min_vol, _, _ = self.volume_limits(symbol, broker_rules)
         volume = self.normalize_volume(symbol, account_balance * target_risk / risk_per_lot, broker_rules)
         actual_risk = volume * risk_per_lot
         # Clamping up to the broker's minimum lot can multiply the intended risk;
-        # on small accounts that is the main route to ruin, so refuse instead.
-        if actual_risk > account_balance * self.max_risk_pct * 1.0001:
+        # on micro accounts (<= $50), allow a buffer (up to 1.8x cap) for broker minimum lots
+        # while strictly refusing catastrophic exposures (>12% / 40%).
+        risk_cap = (
+            self.max_risk_pct * 1.8
+            if (account_balance <= 50.0 and volume <= min_vol * 1.0001)
+            else self.max_risk_pct
+        )
+        if actual_risk > account_balance * risk_cap * 1.0001:
             return _rejected(
                 f"Minimum lot {volume:g} risks {actual_risk / account_balance:.1%} of balance "
                 f"(cap {self.max_risk_pct:.1%})"
