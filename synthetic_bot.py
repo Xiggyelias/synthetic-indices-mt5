@@ -395,6 +395,8 @@ def run_cloud_surveillance_loop(cfg: SyntheticBotConfig, logger: logging.Logger)
     from trade_storage import TradeStorageManager
 
     brain = CalculativeBrain.from_config(cfg.brain_params)
+    if cfg.calibration_enabled:
+        brain.calibrator = ProbabilityCalibrator(cfg.calibration_path)
     risk_mgr = SyntheticRiskManager(
         max_risk_pct=cfg.max_risk_pct,
         kelly_fraction=cfg.kelly_fraction,
@@ -487,6 +489,7 @@ def run_cloud_surveillance_loop(cfg: SyntheticBotConfig, logger: logging.Logger)
                     seen_symbols.add(d_sym)
             equity = float(live_state.get("equity", equity))
             balance = float(live_state.get("balance", balance))
+            candidate_signals = []
             for sym in cfg.symbols:
                 # 1. Fetch live Deriv WebSocket market candles
                 df = get_deriv_live_candles(sym, cfg.timeframe, cfg.lookback_bars)
@@ -602,7 +605,11 @@ def run_cloud_surveillance_loop(cfg: SyntheticBotConfig, logger: logging.Logger)
                     if closed:
                         pnl_points = (exit_price - entry_p) if direction == "BUY" else (entry_p - exit_price)
                         pnl_r = round(pnl_points / r_dist, 2)
-                        pnl_usd = round(pnl_points * vol, 2)
+                        # Exact mathematical dollar PnL based on calibrated risk
+                        trade_risk_dollars = float(t.get("risk_dollars", 0.0))
+                        if trade_risk_dollars <= 0.0:
+                            trade_risk_dollars = min(equity * 0.04, 0.45) if equity <= 50.0 else max(r_dist * vol, 0.50)
+                        pnl_usd = round(pnl_r * trade_risk_dollars, 2)
                         equity = round(equity + pnl_usd, 2)
                         balance = round(balance + pnl_usd, 2)
 
@@ -613,12 +620,23 @@ def run_cloud_surveillance_loop(cfg: SyntheticBotConfig, logger: logging.Logger)
                             pnl_r=pnl_r,
                             close_reason=reason,
                         )
+                        if brain.calibrator:
+                            brain.calibrator.record(
+                                archetype=t.get("strategy_type", "FRACTAL_MOMENTUM"),
+                                claimed_p=float(t.get("win_probability", 0.60)),
+                                won=(pnl_usd > 0),
+                            )
                         if ticket in open_trades:
                             del open_trades[ticket]
                         logger.info("🏁 [TRADE CLOSED] #%s %s %s -> %s | PnL: %+.2fR ($%+.2f) | Equity: $%.2f",
                                     ticket, direction, sym, reason, pnl_r, pnl_usd, equity)
 
                 # 3. Quantitative Signal Evaluation (Primary M5 with M1 Multi-Timeframe Scan)
+                # Micro-account gate: skip instruments whose minimum lot exceeds safe risk
+                is_tradable, rej_msg = risk_mgr.is_symbol_tradable_for_account(sym, equity)
+                if not is_tradable:
+                    continue
+
                 signal = strategy.evaluate(df, symbol=sym, account_balance=equity, timeframe=cfg.timeframe)
                 if not signal or not signal.sizing or not signal.sizing.is_valid:
                     # Multi-Timeframe High-Yield Scan: evaluate M1 for rapid micro-scalps
@@ -637,40 +655,50 @@ def run_cloud_surveillance_loop(cfg: SyntheticBotConfig, logger: logging.Logger)
                     if signal.calculated_win_prob < 0.55:
                         continue
 
-                    ticket = str(900000 + (cycle_count * 100 + len(open_trades)) % 100000)
-                    if len(open_trades) < cfg.max_open_trades and ticket not in open_trades:
-                        new_trade_doc = {
-                            "ticket": ticket,
-                            "symbol": signal.symbol,
-                            "direction": signal.direction,
-                            "volume": signal.sizing.volume,
-                            "entry_price": round(signal.entry_price, 5),
-                            "stop_loss": round(signal.stop_loss, 5),
-                            "take_profit": round(signal.take_profit, 5),
-                            "strategy_type": signal.strategy_type,
-                            "math_edge_score": round(signal.math_edge_score, 1),
-                            "win_probability": round(signal.calculated_win_prob, 3),
-                            "kalman_confirmation": signal.kalman_confirmation,
-                            "var_risk_level": signal.var_risk_level,
-                            "opened_at": datetime.now(timezone.utc).isoformat(),
-                            "moved_to_be": False,
-                            "tp1_reached": False,
-                        }
-                        open_trades[ticket] = new_trade_doc
-                        storage.save_open_trade(ticket, new_trade_doc)
-                        logger.info("🎯 [CLOUD SIGNAL] %s %s | Edge: %.1f%% | Vol: %.3f | Ticket: %s",
-                                    signal.symbol, signal.direction, signal.math_edge_score, signal.sizing.volume, ticket)
-                        if notifier:
-                            notifier.send_trade_execution({
-                                "direction": signal.direction,
-                                "symbol": signal.symbol,
-                                "entry_price": str(signal.entry_price),
-                                "stop_loss": str(signal.stop_loss),
-                                "take_profit": str(signal.take_profit),
-                                "math_edge": f"{signal.math_edge_score:.1f}%",
-                                "win_prob": f"{signal.calculated_win_prob:.1%}",
-                                "strategy": signal.strategy_type,
-                            })
+                    candidate_signals.append(signal)
+
+            # STAGGERED ENTRY THROTTLE: Open at most 1 trade per cycle (highest edge first)
+            max_allowed_trades = 2 if equity <= 50.0 else cfg.max_open_trades
+            if candidate_signals and len(open_trades) < max_allowed_trades:
+                candidate_signals.sort(key=lambda s: (s.math_edge_score * s.calculated_win_prob), reverse=True)
+                best_signal = candidate_signals[0]
+
+                ticket = str(900000 + (cycle_count * 100 + len(open_trades)) % 100000)
+                if ticket not in open_trades:
+                    new_trade_doc = {
+                        "ticket": ticket,
+                        "symbol": best_signal.symbol,
+                        "direction": best_signal.direction,
+                        "volume": best_signal.sizing.volume,
+                        "risk_dollars": round(best_signal.sizing.risk_dollars, 2),
+                        "entry_price": round(best_signal.entry_price, 5),
+                        "stop_loss": round(best_signal.stop_loss, 5),
+                        "take_profit": round(best_signal.take_profit, 5),
+                        "strategy_type": best_signal.strategy_type,
+                        "math_edge_score": round(best_signal.math_edge_score, 1),
+                        "win_probability": round(best_signal.calculated_win_prob, 3),
+                        "kalman_confirmation": best_signal.kalman_confirmation,
+                        "var_risk_level": best_signal.var_risk_level,
+                        "opened_at": datetime.now(timezone.utc).isoformat(),
+                        "moved_to_be": False,
+                        "tp1_reached": False,
+                    }
+                    open_trades[ticket] = new_trade_doc
+                    storage.save_open_trade(ticket, new_trade_doc)
+                    logger.info("🎯 [CLOUD SIGNAL] %s %s | Edge: %.1f%% | Vol: %.3f | Risk: $%.2f | Ticket: %s",
+                                best_signal.symbol, best_signal.direction, best_signal.math_edge_score,
+                                best_signal.sizing.volume, best_signal.sizing.risk_dollars, ticket)
+                    if notifier:
+                        notifier.send_trade_execution({
+                            "direction": best_signal.direction,
+                            "symbol": best_signal.symbol,
+                            "entry_price": str(best_signal.entry_price),
+                            "stop_loss": str(best_signal.stop_loss),
+                            "take_profit": str(best_signal.take_profit),
+                            "math_edge": f"{best_signal.math_edge_score:.1f}%",
+                            "win_prob": f"{best_signal.calculated_win_prob:.1%}",
+                            "strategy": best_signal.strategy_type,
+                        })
 
             storage.update_portfolio_state(equity=equity, balance=balance, mode="CLOUD_AUTONOMOUS_LIVE_WEB")
             if cycle_count % 5 == 1:

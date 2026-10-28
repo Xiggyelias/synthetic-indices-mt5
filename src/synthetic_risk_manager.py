@@ -155,6 +155,23 @@ class SyntheticRiskManager:
         return p * reward_dollars - (1.0 - p) * risk_dollars
 
     @staticmethod
+    def is_symbol_tradable_for_account(symbol: str, balance: float) -> tuple[bool, str]:
+        """
+        Micro-account capital preservation gate.
+        For accounts < $50, only allow instruments with true micro-fractional lot sizes (<= 0.005),
+        such as Volatility 75 (0.001), Volatility 75 1s (0.005), Volatility 50 (0.001), Volatility 50 1s (0.005).
+        Instruments with 0.10+ min lots (Crash/Boom/Step/Vol 25) can wipe micro accounts on single adverse ticks.
+        """
+        spec = DERIV_SYNTHETIC_SPECS.get(
+            symbol.upper().replace("_", " ").strip(),
+            DERIV_SYNTHETIC_SPECS.get(symbol.upper(), {}),
+        )
+        min_lot = float(spec.get("min_lot", 0.01))
+        if balance < 50.0 and min_lot > 0.005:
+            return False, f"Minimum lot {min_lot:g} too large for micro account (${balance:.2f} < $50.00)"
+        return True, ""
+
+    @staticmethod
     def volume_limits(symbol: str, broker_rules: Optional[Any]) -> tuple[float, float, float]:
         """(min_lot, max_lot, lot_step) from broker rules, falling back to the Deriv specs."""
         spec = DERIV_SYNTHETIC_SPECS.get(
@@ -200,6 +217,10 @@ class SyntheticRiskManager:
         """
         if account_balance <= 0:
             return _rejected("Zero or negative balance")
+
+        tradable, rej_msg = self.is_symbol_tradable_for_account(symbol, account_balance)
+        if not tradable:
+            return _rejected(rej_msg)
 
         price_risk = abs(float(entry_price) - float(stop_loss))
         if price_risk <= 0:

@@ -1798,8 +1798,25 @@ with tabs[4]:
             st.write("")
             st.write("")
             if st.button("🔄 Full Reset & Restart", key="full_reset_btn", type="primary", use_container_width=True):
+                # 1. Terminate running background engine
+                kill_autonomous_bot()
+
+                # 2. Wipe MongoDB and local state cleanly
                 storage.full_reset(starting_equity=new_capital, starting_balance=new_capital)
-                # Update config file
+
+                # 3. Wipe stale calibration data
+                calib_file = ROOT / "data" / "synthetic_calibration.json"
+                if calib_file.exists():
+                    try:
+                        calib_file.unlink(missing_ok=True)
+                    except Exception:
+                        pass
+
+                # 4. Remove manual stop flags
+                stop_flag = ROOT / "data" / "engine_manual_stop.flag"
+                stop_flag.unlink(missing_ok=True)
+
+                # 5. Update config file
                 try:
                     import json as _jr
                     cfg_path = ROOT / "config" / "config_synthetic.json"
@@ -1810,11 +1827,19 @@ with tabs[4]:
                     cfg_path.write_text(_jr.dumps(cfg, indent=2), encoding="utf-8")
                 except Exception:
                     pass
-                st.toast(f"🔄 Account reset to ${new_capital:,.2f}! All positions closed, history cleared.", icon="🔄")
+
+                # 6. Update in-memory environment variable
+                os.environ["STARTING_BALANCE"] = str(new_capital)
+
+                # 7. Relaunch autonomous background engine cleanly with new capital
+                launch_autonomous_bot()
+
+                st.toast(f"🔄 Account reset to ${new_capital:,.2f}! Bot restarted with clean state.", icon="🔄")
                 time.sleep(0.5)
                 st.rerun()
 
-        # Build clean structured table with explicit WIN / LOSS Outcome column
+    # Build clean structured table with explicit WIN / LOSS Outcome column (always visible under history)
+    if closed_pos:
         formatted_rows = []
         for t in reversed(closed_pos):
             pnl_usd = float(t.get("pnl_usd", 0.0))

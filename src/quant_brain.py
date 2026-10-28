@@ -1160,16 +1160,10 @@ class CalculativeBrain:
         is_crash = "CRASH" in sym_upper
         drift_sign = 1.0 if is_crash else -1.0  # Crash drifts up, Boom drifts down
         if ph.recommended_side == "HARVEST_DRIFT":
-            return _TradePlan(
-                direction="BUY" if is_crash else "SELL",
-                archetype="QUIESCENT_DRIFT_HARVEST",
-                target=price + drift_sign * ph.drift_target,
-                target_2=price + drift_sign * ph.drift_target * 1.5,
-                stop=price - drift_sign * ph.drift_stop,
-                win_prob=ph.drift_win_prob,
-                horizon_bars=max(3, int(round(ph.drift_target / ph.drift_per_bar))),
-                loss_r=ph.drift_loss_r,
-            )
+            # DRIFT HARVESTING SUPPRESSED: Riding the slow drift bets against sudden Poisson spikes.
+            # On micro and compounding accounts, a single gap spike causes catastrophic loss.
+            # The Quantum Sovereign Engine strictly enforces positive-skewness CATCH_SPIKE trades only.
+            return None
         if ph.recommended_side == "CATCH_SPIKE":
             return _TradePlan(
                 direction="SELL" if is_crash else "BUY",
