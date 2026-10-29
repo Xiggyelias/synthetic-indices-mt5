@@ -600,15 +600,57 @@ class SyntheticBotSystem:
         if not t:
             return
         t["closed_at"] = datetime.now(timezone.utc).isoformat()
-        pnl = self._realised_pnl(ticket)
+        deals = []
+        try:
+            deals = self.conn.get_position_history(ticket) or []
+        except Exception:
+            pass
+
+        exit_price = None
+        exit_comment = ""
+        pnl = None
+        if deals:
+            pnl = float(sum(float(getattr(d, f, 0.0) or 0.0) for d in deals for f in ("profit", "commission", "swap")))
+            exit_deals = [d for d in deals if getattr(d, "entry", -1) == 1]
+            if exit_deals:
+                exit_price = float(getattr(exit_deals[-1], "price", 0.0) or 0.0)
+                exit_comment = str(getattr(exit_deals[-1], "comment", "") or "")
+            elif len(deals) > 1:
+                exit_price = float(getattr(deals[-1], "price", 0.0) or 0.0)
+                exit_comment = str(getattr(deals[-1], "comment", "") or "")
+        else:
+            pnl = self._realised_pnl(ticket)
+
         if pnl is not None:
             t["realised_pnl"] = round(pnl, 2)
+            t["pnl_usd"] = round(pnl, 2)
+            t["outcome"] = "🟢 WIN" if pnl > 0.001 else ("🔴 LOSS" if pnl < -0.001 else "⚪ BREAKEVEN")
             if self.brain.calibrator is not None:
                 self.brain.calibrator.record(
                     str(t.get("strategy_type", "")),
                     float(t.get("model_win_probability", t.get("win_probability", 0.5))),
                     won=pnl > 0,
                 )
+        if exit_price:
+            t["exit_price"] = round(exit_price, 4)
+
+        if "[sl" in exit_comment.lower():
+            t["close_reason"] = "TRAILING_STOP" if (pnl and pnl > 0) else "STOP_LOSS"
+        elif "[tp" in exit_comment.lower():
+            t["close_reason"] = "TAKE_PROFIT"
+        elif not t.get("close_reason"):
+            t["close_reason"] = "TRAILING_STOP" if (pnl and pnl > 0) else "CLOSED"
+
+        entry = float(t.get("entry_price") or 0.0)
+        init_sl = float(t.get("initial_stop_loss") or t.get("stop_loss") or 0.0)
+        risk_dist = abs(entry - init_sl)
+        if risk_dist > 0 and exit_price:
+            direction = str(t.get("direction", "BUY")).upper()
+            gain = (exit_price - entry) if direction == "BUY" else (entry - exit_price)
+            t["pnl_r"] = round(gain / risk_dist, 2)
+        else:
+            t["pnl_r"] = 1.0 if (pnl and pnl > 0) else (-1.0 if (pnl and pnl < 0) else 0.0)
+
         self.closed_trades.append(t)
         self._save_state()
 

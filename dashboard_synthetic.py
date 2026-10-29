@@ -1791,7 +1791,7 @@ with tabs[4]:
                 vol = float(t.get("volume", 0.01))
                 cur_p = float(t.get("live_price", entry_p))
                 pnl_r = float(t.get("pnl_r", 0.0))
-                pnl_usd = float(t.get("pnl_usd", 0.0))
+                pnl_usd = float(t.get("pnl_usd") if t.get("pnl_usd") is not None else t.get("realised_pnl", 0.0))
                 pnl_color = "#3fb950" if pnl_usd >= 0 else "#f85149"
 
                 with st.container():
@@ -1823,18 +1823,18 @@ with tabs[4]:
         st.markdown("##### 📜 Closed Trades History")
 
         # Performance summary metrics (strictly mutually exclusive)
-        wins = [t for t in closed_pos if float(t.get("pnl_usd", 0.0)) > 0.001]
-        losses = [t for t in closed_pos if float(t.get("pnl_usd", 0.0)) < -0.001]
-        bes = [t for t in closed_pos if abs(float(t.get("pnl_usd", 0.0))) <= 0.001]
+        wins = [t for t in closed_pos if float(t.get("pnl_usd", t.get("realised_pnl", 0.0)) or 0.0) > 0.001]
+        losses = [t for t in closed_pos if float(t.get("pnl_usd", t.get("realised_pnl", 0.0)) or 0.0) < -0.001]
+        bes = [t for t in closed_pos if abs(float(t.get("pnl_usd", t.get("realised_pnl", 0.0)) or 0.0)) <= 0.001]
         total_closed = len(closed_pos)
         win_rate = (len(wins) / (len(wins) + len(losses)) * 100.0) if (len(wins) + len(losses)) > 0 else 0.0
-        tot_realized = sum(float(t.get("pnl_usd", 0.0)) for t in closed_pos)
+        tot_realized = sum(float(t.get("pnl_usd", t.get("realised_pnl", 0.0)) or 0.0) for t in closed_pos)
 
         wcol1, wcol2, wcol3, wcol4 = st.columns([1.5, 1.5, 1.5, 1])
         wcol1.metric("Win Rate", f"{win_rate:.1f}%", f"{len(wins)}W / {len(losses)}L / {len(bes)}BE")
         wcol2.metric("Total Realized P&L", f"${tot_realized:+,.2f}", f"{total_closed} Total Trades")
-        avg_w = (sum(float(t.get("pnl_usd", 0.0)) for t in wins) / len(wins)) if wins else 0.0
-        avg_l = (sum(float(t.get("pnl_usd", 0.0)) for t in losses) / len(losses)) if losses else 0.0
+        avg_w = (sum(float(t.get("pnl_usd", t.get("realised_pnl", 0.0)) or 0.0) for t in wins) / len(wins)) if wins else 0.0
+        avg_l = (sum(float(t.get("pnl_usd", t.get("realised_pnl", 0.0)) or 0.0) for t in losses) / len(losses)) if losses else 0.0
         wcol3.metric("Avg Win / Loss", f"+${avg_w:.2f}", f"-${abs(avg_l):.2f}")
         with wcol4:
             st.write("")
@@ -1898,7 +1898,7 @@ with tabs[4]:
     if closed_pos:
         formatted_rows = []
         for t in reversed(closed_pos):
-            pnl_usd = float(t.get("pnl_usd", 0.0))
+            pnl_usd = float(t.get("pnl_usd") if t.get("pnl_usd") is not None else t.get("realised_pnl", 0.0))
             pnl_r = float(t.get("pnl_r", 0.0))
             reason = str(t.get("close_reason", "")).upper()
 
