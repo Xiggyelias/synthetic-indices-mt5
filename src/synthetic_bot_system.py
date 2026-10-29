@@ -202,9 +202,12 @@ class SyntheticBotSystem:
         path = Path(self.config.state_path)
         path.parent.mkdir(parents=True, exist_ok=True)
         try:
+            summary = self.conn.get_account_summary() or {}
             payload = {
                 "open_trades": self.open_trades,
                 "closed_trades": self.closed_trades[-200:],
+                "balance": float(summary.get("balance", 0.0) or 0.0) if summary else None,
+                "equity": float(summary.get("equity", 0.0) or 0.0) if summary else None,
                 "updated_at": datetime.now(timezone.utc).isoformat(),
                 "cycle_count": self._cycle_count,
             }

@@ -6,8 +6,8 @@
   "active_symbols": [
     "Volatility 75 Index",
     "Volatility 75 (1s) Index",
-    "Volatility 50 Index",
-    "Volatility 50 (1s) Index"
+    "Volatility 50 (1s) Index",
+    "Volatility 25 (1s) Index"
   ],
   "timeframe": "M5",
   "lookback_bars": 300,

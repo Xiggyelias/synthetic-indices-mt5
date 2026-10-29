@@ -249,8 +249,12 @@ class SyntheticRiskManager:
         value_per_price_unit = tick_value / tick_size if tick_size > 0 and tick_value > 0 else 1.0
         risk_per_lot = price_risk * value_per_price_unit
 
-        min_vol, _, _ = self.volume_limits(symbol, broker_rules)
-        volume = self.normalize_volume(symbol, account_balance * target_risk / risk_per_lot, broker_rules)
+        min_vol, max_vol, _ = self.volume_limits(symbol, broker_rules)
+        raw_vol = account_balance * target_risk / risk_per_lot
+        if account_balance <= 50.0:
+            # Guarantee broker margin safety on micro capital (< $50)
+            raw_vol = min(raw_vol, min_vol * 1.5)
+        volume = self.normalize_volume(symbol, raw_vol, broker_rules)
         actual_risk = volume * risk_per_lot
         # Clamping up to the broker's minimum lot can multiply the intended risk;
         # on micro accounts (<= $50), allow a buffer (up to 1.8x cap) for broker minimum lots
