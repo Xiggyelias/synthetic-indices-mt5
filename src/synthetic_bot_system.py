@@ -266,17 +266,19 @@ class SyntheticBotSystem:
 
     def execute_signal(self, sig: SyntheticSignal) -> bool:
         """Place the trade in MT5 with the Kelly-sized volume."""
-        summary = self.conn.get_account_summary() or {}
-        acct_equity = float(summary.get("equity", 0.0) or summary.get("balance", 0.0) or 10.0)
-        max_trades = 1 if acct_equity <= 25.0 else (2 if acct_equity <= 50.0 else self.config.max_open_trades)
+        max_trades = min(3, self.config.max_open_trades)
         if len(self.open_trades) >= max_trades:
-            self.logger.info("Max open trades reached (%d/%d for capital $%.2f); skipping %s",
-                             len(self.open_trades), max_trades, acct_equity, sig.symbol)
+            self.logger.info("Max open trades reached (%d/%d); skipping %s",
+                             len(self.open_trades), max_trades, sig.symbol)
             return False
+
         same_symbol = [t for t in self.open_trades.values() if t.get("symbol") == sig.symbol]
-        if same_symbol and (acct_equity <= 50.0 or not self._can_pyramid(sig, same_symbol)):
-            self.logger.info("Trade already active for %s; skipping", sig.symbol)
-            return False
+        if same_symbol:
+            if not self._can_pyramid(sig, same_symbol):
+                self.logger.info("Trade already active for %s (awaiting profit lock before scale-in); skipping", sig.symbol)
+                return False
+            self.logger.info("⚡ MULTI-ORDER DONE RIGHT: Existing %s position is locked in profit! Scale-in leg #%d approved.",
+                             sig.symbol, len(same_symbol) + 1)
         if sig.sizing is None or sig.sizing.volume <= 0:
             return False
 
