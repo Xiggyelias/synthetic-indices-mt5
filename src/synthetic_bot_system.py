@@ -572,17 +572,19 @@ class SyntheticBotSystem:
                 self._extend_target(ticket, t, price)
 
         # Stop tightening; each rule fires once and `_tighten_stop` never loosens
-        if profit_r >= self.config.be_trigger_r and not t.get("moved_to_be"):
-            if self._tighten_stop(ticket, t, self._lock(entry, direction, r_distance, 0.15), "Q-BE"):
-                self.logger.info("Breakeven+0.15R locked on %s ticket=%d (%+.2fR)", symbol, ticket, profit_r)
-                self.notifier.send(f"🛡️ Breakeven+0.15R locked on {symbol} (ticket {ticket})")
+        be_thresh = 0.40 if getattr(self, "open_trades", None) else self.config.be_trigger_r
+        if profit_r >= be_thresh and not t.get("moved_to_be"):
+            if self._tighten_stop(ticket, t, self._lock(entry, direction, r_distance, 0.10), "Q-BE"):
+                self.logger.info("Breakeven+0.10R locked on %s ticket=%d (%+.2fR)", symbol, ticket, profit_r)
+                self.notifier.send(f"🛡️ Breakeven+0.10R locked on {symbol} (ticket {ticket})")
             t["moved_to_be"] = True
 
         if t.get("runner"):
             self._manage_runner(ticket, t, price, entry, direction, r_distance, profit_r)
             return
 
-        if strat == "OU_MEAN_REVERSION" and self.config.kalman_trail_enable and profit_r >= 1.5:
+        # Universal Kalman & Volatility trail across all mean-reverting archetypes
+        if strat in ("OU_MEAN_REVERSION", "KALMAN_FAIR_VALUE_REVERSION", "FRACTIONAL_KINETIC_SNIPE") and self.config.kalman_trail_enable and profit_r >= 0.70:
             kalman_sl = self._kalman_trailing_stop(symbol, direction, entry, r_distance)
             if kalman_sl is not None and self._tighten_stop(ticket, t, kalman_sl, "Q-KALMAN-TRAIL"):
                 self.logger.info("Kalman trail on %s ticket=%d: SL→%.5f (%+.2fR)", symbol, ticket, kalman_sl, profit_r)

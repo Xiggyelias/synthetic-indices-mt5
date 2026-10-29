@@ -1042,15 +1042,15 @@ class CalculativeBrain:
         if direction == "SELL" and kalman_z < -0.8:
             return None
 
-        stop_dist = max(price * gk_vol * 1.1, price * 0.0010)
-        stop_dist = min(stop_dist, price * 0.0035)
+        stop_dist = max(price * gk_vol * 1.8, price * 0.0020)
+        stop_dist = min(stop_dist, price * 0.015)
 
         target_dist = stop_dist * 2.0
         target = price + target_dist if direction == "BUY" else price - target_dist
         target_2 = price + stop_dist * 3.2 if direction == "BUY" else price - stop_dist * 3.2
         stop = price - stop_dist if direction == "BUY" else price + stop_dist
 
-        win_prob = float(np.clip(0.66 + 0.12 * math.tanh(abs(z_ffd) - 1.4), 0.65, 0.82))
+        win_prob = float(np.clip(0.68 + 0.12 * math.tanh(abs(z_ffd) - 1.4), 0.65, 0.85))
 
         return _TradePlan(
             direction=direction,
@@ -1186,17 +1186,16 @@ class CalculativeBrain:
         raw_target = abs(price - fair)
         if raw_target <= 0:
             return None
-        # Disciplined, volatility-scaled stop loss: 0.70x target or 1.1x GK vol
-        # Capped to 0.35% of price to prevent outsized drawdowns, with 0.08% spread floor
-        stop_dist = max(raw_target * 0.70, price * gk_vol * 1.1)
-        stop_dist = min(stop_dist, price * 0.0035)
-        stop_dist = max(stop_dist, price * 0.0008)
+        # Volatility-buffered stop loss: outside 1.8x GK volatility and 0.85x target distance
+        stop_dist = max(raw_target * 0.85, price * gk_vol * 1.8)
+        stop_dist = max(stop_dist, price * 0.0020)
+        stop_dist = min(stop_dist, price * 0.015)
         stop = price + stop_dist if direction == "SELL" else price - stop_dist
-        # High-probability target at fair value with asymmetric minimum 1.80R reward
-        target_dist = max(raw_target * 1.25, stop_dist * 1.80)
+        # Asymmetric institutional target with minimum 1.80R reward
+        target_dist = max(raw_target * 1.35, stop_dist * 1.80)
         target = price - target_dist if direction == "SELL" else price + target_dist
         target_2 = price - target_dist * 1.6 if direction == "SELL" else price + target_dist * 1.6
-        win_prob = float(np.clip(0.62 + 0.12 * math.tanh(abs(z) - 1.0), 0.60, 0.82))
+        win_prob = float(np.clip(0.66 + 0.12 * math.tanh(abs(z) - 1.5), 0.64, 0.85))
         return _TradePlan(
             direction=direction,
             archetype="KALMAN_FAIR_VALUE_REVERSION",
@@ -1267,7 +1266,7 @@ class CalculativeBrain:
                 plan = self._ou_plan(price, ou)
             if plan is None and hurst.regime == "PERSISTENT" and entropy.is_ordered:
                 plan = self._momentum_plan(df, price, gk_vol)
-            if plan is None and abs(kalman.zscore) >= 1.7:
+            if plan is None and abs(kalman.zscore) >= 2.0 and ou.adf_tstat < 0.0:
                 plan = self._kalman_plan(price, kalman, gk_vol)
 
         confluence = compute_multi_scale_confluence(df, factor=3, direction=plan.direction if plan else None)

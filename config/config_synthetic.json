@@ -4,7 +4,6 @@
   "market_type": "SYNTHETIC_INDICES",
   "description": "Micro-account $5 -> $1000 compound challenge. Focuses on V75, V50, and Step Index (lowest min lot sizes). Aggressive Half-Kelly compounding on high-conviction setups only.",
   "active_symbols": [
-    "Volatility 75 Index",
     "Volatility 75 (1s) Index",
     "Volatility 50 (1s) Index"
   ],
@@ -14,7 +13,7 @@
   "fast_poll_seconds": 4,
   "slow_poll_seconds": 15,
   "magic_number": 20260909,
-  "min_math_edge": 54.0,
+  "min_math_edge": 60.0,
   "calculative_brain": {
     "hurst_anti_persistent_threshold": 0.46,
     "hurst_persistent_threshold": 0.54,
@@ -33,9 +32,9 @@
     "aggressive_mode": true,
     "fractional_kelly_multiplier": 0.5,
     "max_risk_per_trade": 0.05,
-    "max_open_trades": 2,
+    "max_open_trades": 1,
     "max_drawdown_limit": 0.25,
-    "be_trigger_r": 0.8,
+    "be_trigger_r": 0.4,
     "spike_harvest_r": 2.5,
     "var_emergency_threshold": 6.5,
     "kalman_trail_enable": true,
