@@ -119,7 +119,7 @@ def get_connection() -> MT5Connection:
         terminal_path=path_val,
         path=path_val,
         portable=False,
-        is_demo=True,
+        is_demo="demo" in os.getenv("MT5_SERVER", "Deriv-Demo").lower(),
     )
     return MT5Connection(creds)
 
