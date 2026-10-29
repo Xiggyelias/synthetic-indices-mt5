@@ -259,12 +259,13 @@ class SyntheticRiskManager:
         # Clamping up to the broker's minimum lot can multiply the intended risk;
         # on micro accounts (<= $50), allow a buffer (up to 1.8x cap) for broker minimum lots
         # while strictly refusing catastrophic exposures (>12% / 40%).
+        micro_dollar_pass = (account_balance <= 15.0 and volume <= min_vol * 1.0001 and actual_risk <= 1.35)
         risk_cap = (
             self.max_risk_pct * 2.5
             if (account_balance <= 50.0 and volume <= min_vol * 1.0001)
             else self.max_risk_pct
         )
-        if actual_risk > account_balance * risk_cap * 1.0001:
+        if actual_risk > account_balance * risk_cap * 1.0001 and not micro_dollar_pass:
             return _rejected(
                 f"Minimum lot {volume:g} risks {actual_risk / account_balance:.1%} of balance "
                 f"(cap {self.max_risk_pct:.1%})"
