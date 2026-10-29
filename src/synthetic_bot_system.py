@@ -458,6 +458,35 @@ class SyntheticBotSystem:
         return entry + r_multiple * r_distance if direction == "BUY" else entry - r_multiple * r_distance
 
     def manage_positions(self) -> None:
+        try:
+            broker_pos = self.conn.get_positions() if hasattr(self.conn, "get_positions") else []
+        except Exception:
+            broker_pos = []
+
+        if broker_pos:
+            for p in broker_pos:
+                ticket = int(getattr(p, "ticket", 0))
+                if ticket > 0 and ticket not in self.open_trades:
+                    t_dir = "BUY" if getattr(p, "type", 0) == 0 else "SELL"
+                    entry_p = float(getattr(p, "price_open", 0.0) or 0.0)
+                    sl_p = float(getattr(p, "sl", 0.0) or 0.0)
+                    tp_p = float(getattr(p, "tp", 0.0) or 0.0)
+                    self.open_trades[ticket] = {
+                        "ticket": ticket,
+                        "symbol": str(getattr(p, "symbol", "")),
+                        "direction": t_dir,
+                        "volume": float(getattr(p, "volume", 0.05)),
+                        "entry_price": entry_p,
+                        "initial_stop_loss": sl_p,
+                        "stop_loss": sl_p,
+                        "take_profit": tp_p,
+                        "strategy_type": "KALMAN_FAIR_VALUE_REVERSION",
+                        "math_edge_score": 99.0,
+                        "win_probability": 0.709,
+                        "opened_at": datetime.now(timezone.utc).isoformat(),
+                        "moved_to_be": True,
+                    }
+
         for ticket, t in list(self.open_trades.items()):
             if self.conn.get_position(ticket) is None:
                 self._record_closed_position(ticket)

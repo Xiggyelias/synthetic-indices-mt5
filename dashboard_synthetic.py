@@ -1711,22 +1711,18 @@ with tabs[4]:
                 wl_status = "⚪ BREAKEVEN"
 
             open_rows.append({
-                "symbol": t.get("symbol", "—"),
-                "direction": t.get("direction", "BUY"),
-                "win_or_loss": wl_status,
-                "floating_pnl": f"${pnl_u:+,.2f}",
-                "yield_r": f"{pnl_r_val:+.2f}R",
-                "volume": t.get("volume", 0.0),
-                "entry_price": round(float(t.get("entry_price", 0.0)), 4),
-                "live_price": round(float(t.get("live_price", 0.0)), 4),
-                "stop_loss": round(float(t.get("stop_loss", 0.0)), 4),
-                "take_profit": round(float(t.get("take_profit", 0.0)), 4),
-                "strategy_type": t.get("strategy_type", "—"),
-                "math_edge_score": round(float(t.get("math_edge_score", 0.0)), 1),
-                "win_probability": round(float(t.get("win_probability", 0.5)), 3),
-                "kalman_confirmation": t.get("kalman_confirmation", "CONFIRMS"),
-                "var_risk_level": t.get("var_risk_level", "LOW"),
-                "opened_at": t.get("opened_at", ""),
+                "Ticket": f"#{ticket}",
+                "Symbol": t.get("symbol", "—"),
+                "Direction": "🟢 BUY" if t.get("direction") == "BUY" else "🔴 SELL",
+                "Status": wl_status,
+                "Floating PnL": f"${pnl_u:+,.2f}",
+                "Gain (R)": f"{pnl_r_val:+.2f}R",
+                "Volume": t.get("volume", 0.0),
+                "Entry Price": round(float(t.get("entry_price", 0.0)), 2),
+                "Live Price": round(float(t.get("live_price", 0.0)), 2),
+                "Stop Loss": round(float(t.get("stop_loss", 0.0)), 2),
+                "Take Profit": round(float(t.get("take_profit", 0.0)), 2),
+                "Strategy": t.get("strategy_type", "—"),
             })
 
         df_open = pd.DataFrame(open_rows)
