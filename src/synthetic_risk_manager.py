@@ -162,13 +162,14 @@ class SyntheticRiskManager:
         such as Volatility 75 (0.001), Volatility 75 1s (0.005), Volatility 50 (0.001), Volatility 50 1s (0.005).
         Instruments with 0.10+ min lots (Crash/Boom/Step/Vol 25) can wipe micro accounts on single adverse ticks.
         """
-        spec = DERIV_SYNTHETIC_SPECS.get(
-            symbol.upper().replace("_", " ").strip(),
-            DERIV_SYNTHETIC_SPECS.get(symbol.upper(), {}),
-        )
-        min_lot = float(spec.get("min_lot", 0.01))
-        if balance < 50.0 and min_lot > 0.005:
-            return False, f"Minimum lot {min_lot:g} too large for micro account (${balance:.2f} < $50.00)"
+        sym_clean = symbol.upper().replace("_", " ").strip()
+        prohibited_micro = [
+            "VOLATILITY 75 INDEX", "R_75",
+            "VOLATILITY 100 INDEX", "R_100",
+            "VOLATILITY 25 INDEX", "R_25",
+        ]
+        if balance < 50.0 and sym_clean in prohibited_micro:
+            return False, f"Minimum lot requires high risk for {symbol}; disabled for micro capital (${balance:.2f} < $50.00)"
         return True, ""
 
     @staticmethod

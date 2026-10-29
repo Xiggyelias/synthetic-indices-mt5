@@ -369,6 +369,8 @@ def fit_ornstein_uhlenbeck(
     dt: float = 1.0,
     adf_critical: float = ADF_CRITICAL_5PCT,
     max_half_life: float = 50.0,
+    residuals: Optional[np.ndarray] = None,
+    fair_value: Optional[float] = None,
 ) -> OUParameters:
     """
     Fit the AR(1) form of dX = θ(μ - X)dt + σ dW:
@@ -385,11 +387,47 @@ def fit_ornstein_uhlenbeck(
             current_zscore=0.0, is_reverting=False
         )
 
+    current_val = float(clean[-1])
+
+    # Enhanced mode: Stationary deviation around dynamic Kalman fair value
+    if residuals is not None and len(residuals) >= 20:
+        clean_resids = residuals[-len(clean):] if len(residuals) >= len(clean) else residuals
+        warm_resids = clean_resids[max(5, len(clean_resids) // 10):]
+        x_prev, x_t = warm_resids[:-1], warm_resids[1:]
+        fit = stats.linregress(x_prev, x_t)
+        a, b = float(fit.slope), float(fit.intercept)
+        adf_t = (a - 1.0) / fit.stderr if fit.stderr > 0 else 0.0
+        mu_val = float(fair_value) if fair_value is not None else float(current_val - warm_resids[-1])
+
+        if 0.001 < a < 0.985:
+            theta = -math.log(a) / dt
+            half_life = math.log(2.0) / theta
+            resids_err = x_t - (a * x_prev + b)
+            var_eps = float(np.var(resids_err, ddof=2))
+            stationary_std = math.sqrt(var_eps / (1.0 - a ** 2)) if a < 1.0 and var_eps > 0 else float(np.std(warm_resids))
+            stationary_std = max(stationary_std, 1e-6)
+            current_deviation = current_val - mu_val
+            zscore = current_deviation / stationary_std
+            is_reverting = adf_t < adf_critical and 0.5 <= half_life <= max_half_life
+
+            fpt_bars = compute_expected_first_passage_time(current_val, mu_val, stationary_std * math.sqrt(2.0 * theta), theta)
+            return OUParameters(
+                theta=round(theta, 5),
+                mu=round(mu_val, 5),
+                sigma=round(stationary_std * math.sqrt(2.0 * theta), 5),
+                half_life=round(half_life, 2),
+                stationary_std=round(stationary_std, 5),
+                current_zscore=round(zscore, 3),
+                is_reverting=is_reverting,
+                expected_fpt_bars=round(fpt_bars, 1),
+                stationary_p_value=round(2.0 * float(stats.norm.sf(abs(zscore))), 4),
+                adf_tstat=round(adf_t, 3),
+            )
+
     x_prev, x_t = clean[:-1], clean[1:]
     fit = stats.linregress(x_prev, x_t)
     a, b = float(fit.slope), float(fit.intercept)
     adf_t = (a - 1.0) / fit.stderr if fit.stderr > 0 else 0.0
-    current_val = float(clean[-1])
 
     if 0.001 < a < 0.999:
         theta = -math.log(a) / dt
@@ -1063,7 +1101,7 @@ class CalculativeBrain:
             loss_r=1.0,
         )
 
-    def _ou_plan(self, price: float, ou: OUParameters) -> Optional[_TradePlan]:
+    def _ou_plan(self, price: float, ou: OUParameters, gk_vol: float = 0.002) -> Optional[_TradePlan]:
         z0 = ou.current_zscore
         if abs(z0) < self.zscore_thresh:
             return None
@@ -1080,11 +1118,11 @@ class CalculativeBrain:
         if target_dist <= 0:
             return None
 
-        # Stop loss: set to at least 1.4x stationary std to avoid premature stops on mean reversion
-        stop_dist = max(std * 1.4, target_dist * 0.75)
-        # Cap stop distance to 0.35% max to avoid outsized losses
-        stop_dist = min(stop_dist, price * 0.0035)
-        stop_dist = max(stop_dist, price * 0.0008)
+        # Stop loss: set outside 1.8x GK volatility and at least 1.2x stationary std
+        stop_dist = max(std * 1.2, target_dist * 0.75)
+        stop_dist = max(stop_dist, price * gk_vol * 1.8)
+        stop_dist = min(stop_dist, price * 0.015)
+        stop_dist = max(stop_dist, price * 0.0010)
 
         target_dist = max(target_dist, stop_dist * 1.60)
         target = price - sign * target_dist
@@ -1243,12 +1281,12 @@ class CalculativeBrain:
             persistent_above=self.hurst_mom_thresh,
             min_r_squared=self.hurst_min_r2,
         )
-        ou = fit_ornstein_uhlenbeck(close, adf_critical=self.adf_critical)
+        kalman = fit_kalman_filter(close, process_noise=self.kalman_q, measurement_noise=self.kalman_r)
+        ou = fit_ornstein_uhlenbeck(close, adf_critical=self.adf_critical, residuals=kalman.residuals, fair_value=kalman.fair_value)
         gk_vol = compute_garman_klass_volatility(df, window=min(self.gk_window, len(df)))
         entropy = compute_shannon_entropy(close, window=min(30, len(df) - 1), order_threshold=self.entropy_thresh)
         poisson = compute_poisson_hazard(df, symbol, k_horizon=self.poisson_horizon)
         step_analysis = compute_step_index_runs_and_markov(close, symbol=symbol) if "STEP" in sym_upper else None
-        kalman = fit_kalman_filter(close, process_noise=self.kalman_q, measurement_noise=self.kalman_r)
         var_95, cvar_95 = compute_var_cvar(df, confidence=0.95, horizon_bars=5, gk_vol=gk_vol)
         z_ffd = compute_fractional_zscore(close, d=0.40)
         sg_smooth, sg_vel, sg_acc = compute_savitzky_golay_dynamics(close, window=15, polyorder=3)
@@ -1262,11 +1300,11 @@ class CalculativeBrain:
             # 1. Sovereign Institutional Engine (FFD memory preservation + zero-lag kinetic turning points)
             if plan is None:
                 plan = self._fractional_kinetic_plan(price, z_ffd, sg_vel, sg_acc, gk_vol, kalman.zscore)
-            if plan is None and ou.is_reverting and (hurst.hurst_exponent <= self.hurst_mr_thresh or ou.adf_tstat < self.adf_critical):
-                plan = self._ou_plan(price, ou)
+            if plan is None and ou.is_reverting and abs(ou.current_zscore) >= self.zscore_thresh:
+                plan = self._ou_plan(price, ou, gk_vol)
             if plan is None and hurst.regime == "PERSISTENT" and entropy.is_ordered:
                 plan = self._momentum_plan(df, price, gk_vol)
-            if plan is None and abs(kalman.zscore) >= 2.0 and ou.adf_tstat < 0.0:
+            if plan is None and abs(kalman.zscore) >= 1.60:
                 plan = self._kalman_plan(price, kalman, gk_vol)
 
         confluence = compute_multi_scale_confluence(df, factor=3, direction=plan.direction if plan else None)

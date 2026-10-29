@@ -57,7 +57,18 @@ class ProbabilityCalibrator:
         fd, tmp = tempfile.mkstemp(dir=self.path.parent, suffix=".tmp")
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             json.dump(self.stats, f, indent=2)
-        os.replace(tmp, self.path)
+        import time, shutil
+        for _ in range(10):
+            try:
+                os.replace(tmp, self.path)
+                break
+            except OSError:
+                time.sleep(0.01)
+        else:
+            try:
+                shutil.move(tmp, self.path)
+            except Exception:
+                pass
 
     def record(self, archetype: str, claimed_p: float, won: bool) -> None:
         s = self.stats.setdefault(archetype, {"n": 0, "wins": 0, "claimed_sum": 0.0})
