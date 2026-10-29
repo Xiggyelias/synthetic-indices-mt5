@@ -266,11 +266,15 @@ class SyntheticBotSystem:
 
     def execute_signal(self, sig: SyntheticSignal) -> bool:
         """Place the trade in MT5 with the Kelly-sized volume."""
-        if len(self.open_trades) >= self.config.max_open_trades:
-            self.logger.info("Max open trades reached (%d); skipping %s", len(self.open_trades), sig.symbol)
+        summary = self.conn.get_account_summary() or {}
+        acct_equity = float(summary.get("equity", 0.0) or summary.get("balance", 0.0) or 10.0)
+        max_trades = 1 if acct_equity <= 25.0 else (2 if acct_equity <= 50.0 else self.config.max_open_trades)
+        if len(self.open_trades) >= max_trades:
+            self.logger.info("Max open trades reached (%d/%d for capital $%.2f); skipping %s",
+                             len(self.open_trades), max_trades, acct_equity, sig.symbol)
             return False
         same_symbol = [t for t in self.open_trades.values() if t.get("symbol") == sig.symbol]
-        if same_symbol and not self._can_pyramid(sig, same_symbol):
+        if same_symbol and (acct_equity <= 50.0 or not self._can_pyramid(sig, same_symbol)):
             self.logger.info("Trade already active for %s; skipping", sig.symbol)
             return False
         if sig.sizing is None or sig.sizing.volume <= 0:
@@ -464,6 +468,7 @@ class SyntheticBotSystem:
             broker_pos = []
 
         if broker_pos:
+            adopted_any = False
             for p in broker_pos:
                 ticket = int(getattr(p, "ticket", 0))
                 if ticket > 0 and ticket not in self.open_trades:
@@ -486,6 +491,9 @@ class SyntheticBotSystem:
                         "opened_at": datetime.now(timezone.utc).isoformat(),
                         "moved_to_be": True,
                     }
+                    adopted_any = True
+            if adopted_any:
+                self._save_state()
 
         for ticket, t in list(self.open_trades.items()):
             if self.conn.get_position(ticket) is None:
@@ -718,6 +726,9 @@ class SyntheticBotSystem:
             if len(self.open_trades) >= self.config.max_open_trades:
                 break
             self.execute_signal(sig)
+
+        if self._cycle_count % 10 == 0 or len(self.open_trades) > 0:
+            self._save_state()
 
         if self._cycle_count % 50 == 0:
             tradable = [s for s, r in self._regime_cache.items() if r in ("PERSISTENT", "ANTI_PERSISTENT")]

@@ -619,6 +619,10 @@ def get_cached_bot_status() -> Tuple[bool, Optional[int]]:
 
 def launch_autonomous_bot() -> Optional[int]:
     """Launch synthetic_bot.py as a 24/7 background process and clear manual stop flag."""
+    existing = get_bot_process()
+    if existing:
+        return existing.pid
+
     stop_flag = ROOT / "data" / "engine_manual_stop.flag"
     stop_flag.unlink(missing_ok=True)
     st.session_state["manual_engine_stopped"] = False
@@ -1646,13 +1650,37 @@ with tabs[4]:
 
     # ── State Summary Metrics ──
     cur_data = storage.get_all_state()
-    
-
-
     open_pos = cur_data.get("open_trades", {})
     closed_pos = cur_data.get("closed_trades", [])
     state_eq = float(cur_data.get("equity", STARTING_CAPITAL))
     state_bal = float(cur_data.get("balance", STARTING_CAPITAL))
+
+    # Synchronize live MT5 positions and balance in real-time
+    if is_mt5_connected:
+        try:
+            m_acc = conn.get_account_info()
+            if m_acc:
+                state_bal = float(getattr(m_acc, "balance", state_bal))
+                state_eq = float(getattr(m_acc, "equity", state_eq))
+            m_pos = conn.get_positions()
+            if m_pos:
+                for mp in m_pos:
+                    m_tkt = str(getattr(mp, "ticket", ""))
+                    if m_tkt and m_tkt not in open_pos:
+                        open_pos[m_tkt] = {
+                            "ticket": mp.ticket,
+                            "symbol": mp.symbol,
+                            "direction": "BUY" if mp.type == 0 else "SELL",
+                            "volume": mp.volume,
+                            "entry_price": mp.price_open,
+                            "stop_loss": mp.sl,
+                            "take_profit": mp.tp,
+                            "live_price": mp.price_current,
+                            "pnl_usd": mp.profit,
+                            "strategy_type": "KALMAN_FAIR_VALUE_REVERSION",
+                        }
+        except Exception:
+            pass
 
     # Pre-calculate live spot prices and real-time floating PnL across all active positions
     live_pos_data = {}

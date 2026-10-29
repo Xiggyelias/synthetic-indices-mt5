@@ -717,6 +717,26 @@ def cmd_run() -> int:
     logger = setup_logger()
     cfg = load_config()
 
+    import psutil
+    pid_file = ROOT / "data" / "synthetic_bot.pid"
+    pid_file.parent.mkdir(parents=True, exist_ok=True)
+    if pid_file.exists():
+        try:
+            old_pid = int(pid_file.read_text(encoding="utf-8").strip())
+            if old_pid != os.getpid() and psutil.pid_exists(old_pid):
+                try:
+                    old_proc = psutil.Process(old_pid)
+                    old_cmd = " ".join(old_proc.cmdline()).lower()
+                    if "synthetic_bot.py" in old_cmd:
+                        logger.warning("⚠️ Another QUANTA-SYNTH instance (PID %d) is already active. Exiting duplicate process.", old_pid)
+                        return 0
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    pass
+        except Exception:
+            pass
+
+    pid_file.write_text(str(os.getpid()), encoding="utf-8")
+
     logger.info("Initializing QUANTA-SYNTH Autonomous Engine...")
     logger.info("Active Synthetic Symbols: %s", ", ".join(cfg.symbols))
     logger.info("Timeframe: %s | Base Poll: %ds | Fast: %ds | Slow: %ds",
@@ -736,6 +756,7 @@ def cmd_run() -> int:
             logger.info("Received termination signal. Shutting down cleanly...")
         finally:
             conn.shutdown()
+            pid_file.unlink(missing_ok=True)
             logger.info("MT5 connection closed.")
         return 0
 
