@@ -5,11 +5,7 @@
   "description": "Micro-account $5 -> $1000 compound challenge. Focuses on V75, V50, and Step Index (lowest min lot sizes). Aggressive Half-Kelly compounding on high-conviction setups only.",
   "active_symbols": [
     "Volatility 75 (1s) Index",
-    "Volatility 50 (1s) Index",
-    "Step Index",
-    "Crash 300 Index",
-    "Boom 300 Index",
-    "Volatility 100 (1s) Index"
+    "Boom 300 Index"
   ],
   "timeframe": "M5",
   "lookback_bars": 300,

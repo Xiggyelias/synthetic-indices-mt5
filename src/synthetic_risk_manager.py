@@ -170,6 +170,14 @@ class SyntheticRiskManager:
         ]
         if balance < 50.0 and sym_clean in prohibited_micro:
             return False, f"Minimum lot requires high risk for {symbol}; disabled for micro capital (${balance:.2f} < $50.00)"
+
+        # Strict Micro-Account Laser Focus: When balance < $15, restrict to verified micro-dollar instruments
+        # Volatility 75 (1s) Index (risk ~$0.89 USD), Boom 300 Index (risk ~$0.64 USD)
+        if balance < 15.0:
+            allowed_micro = ["VOLATILITY 75 (1S) INDEX", "1HZ75V", "BOOM 300 INDEX", "BOOM_300", "BOOM300N"]
+            if sym_clean not in allowed_micro:
+                return False, f"Minimum lot requires high risk for {symbol}; disabled for micro capital (${balance:.2f} < $15.00)"
+
         return True, ""
 
     @staticmethod
