@@ -1170,8 +1170,6 @@ class CalculativeBrain:
         )
 
     def _step_plan(self, df: pd.DataFrame, price: float, step: StepIndexAnalysis) -> Optional[_TradePlan]:
-        if step.recommended_scalp == "STAND_ASIDE":
-            return None
         closes = df["close"].astype(float).values[-60:]
         diffs = np.diff(closes)
         bar_sd = float(np.std(diffs))
@@ -1179,29 +1177,49 @@ class CalculativeBrain:
             return None
         # Symmetric bracket of one bar's typical move, rounded to the 0.1 step
         dist = max(0.1, round(bar_sd, 1))
-        # Next-bar reversal edge from the Markov estimate, shrunk by runs-test strength
-        q = 0.5 + (0.5 - step.streak_continuation_prob) * evidence_weight(step.runs_zscore, NORMAL_CRITICAL_5PCT, 4.0)
-        drift = (2.0 * q - 1.0) * float(np.mean(np.abs(diffs)))
-        sign = 1.0 if step.recommended_scalp == "SCALP_REVERSAL_BUY" else -1.0
-        return _TradePlan(
-            direction="BUY" if sign > 0 else "SELL",
-            archetype="BERNOULLI_STEP_SCALP",
-            target=price + sign * round(dist * 1.5, 1),
-            target_2=price + sign * round(dist * 2.2, 1),
-            stop=price - sign * dist,
-            win_prob=drift_hit_probability(round(dist * 1.5, 1), dist, drift, bar_sd),
-            horizon_bars=3,
-        )
+
+        if step.recommended_scalp != "STAND_ASIDE":
+            # Next-bar reversal edge from the Markov estimate, shrunk by runs-test strength
+            q = 0.5 + (0.5 - step.streak_continuation_prob) * evidence_weight(step.runs_zscore, NORMAL_CRITICAL_5PCT, 4.0)
+            drift = (2.0 * q - 1.0) * float(np.mean(np.abs(diffs)))
+            sign = 1.0 if step.recommended_scalp == "SCALP_REVERSAL_BUY" else -1.0
+            return _TradePlan(
+                direction="BUY" if sign > 0 else "SELL",
+                archetype="BERNOULLI_STEP_SCALP",
+                target=price + sign * round(dist * 1.5, 1),
+                target_2=price + sign * round(dist * 2.2, 1),
+                stop=price - sign * dist,
+                win_prob=drift_hit_probability(round(dist * 1.5, 1), dist, drift, bar_sd),
+                horizon_bars=3,
+            )
+
+        # Asset-Specific: Streak Exhaustion (3+ consecutive bars in one direction with decaying continuation)
+        if step.current_streak_length >= 4 and step.streak_continuation_prob <= 0.40 and step.runs_zscore >= 1.28:
+            sign = -1.0 if step.current_streak_direction == "UP" else 1.0
+            return _TradePlan(
+                direction="BUY" if sign > 0 else "SELL",
+                archetype="STEP_STREAK_EXHAUSTION",
+                target=price + sign * round(dist * 1.5, 1),
+                target_2=price + sign * round(dist * 2.0, 1),
+                stop=price - sign * dist,
+                win_prob=float(np.clip(1.0 - step.streak_continuation_prob, 0.58, 0.72)),
+                horizon_bars=3,
+            )
+
+        return None
 
     @staticmethod
-    def _boom_crash_plan(price: float, sym_upper: str, ph: PoissonHazardResult) -> Optional[_TradePlan]:
+    def _boom_crash_plan(
+        price: float,
+        sym_upper: str,
+        ph: PoissonHazardResult,
+        kalman_z: float = 0.0,
+        kalman_fair: float = 0.0,
+        gk_vol: float = 0.002,
+    ) -> Optional[_TradePlan]:
         is_crash = "CRASH" in sym_upper
+        is_boom = "BOOM" in sym_upper
         drift_sign = 1.0 if is_crash else -1.0  # Crash drifts up, Boom drifts down
-        if ph.recommended_side == "HARVEST_DRIFT":
-            # DRIFT HARVESTING SUPPRESSED: Riding the slow drift bets against sudden Poisson spikes.
-            # On micro and compounding accounts, a single gap spike causes catastrophic loss.
-            # The Quantum Sovereign Engine strictly enforces positive-skewness CATCH_SPIKE trades only.
-            return None
         if ph.recommended_side == "CATCH_SPIKE":
             return _TradePlan(
                 direction="SELL" if is_crash else "BUY",
@@ -1210,8 +1228,41 @@ class CalculativeBrain:
                 target_2=price - drift_sign * ph.median_spike_size,
                 stop=price + drift_sign * ph.spike_stop,
                 win_prob=ph.spike_win_prob,
-                horizon_bars=max(3, int(round(ph.spike_stop / ph.drift_per_bar))),
+                horizon_bars=max(3, int(round(ph.spike_stop / max(ph.drift_per_bar, 1e-6)))),
             )
+
+        # Asset-Specific: Asymmetric Drift-Exhaustion Snipe (aligned with Poisson spike direction)
+        # On Crash: upward drift stretch (Z >= +1.35) -> SELL into fair value & catching downward spike
+        # On Boom: downward drift stretch (Z <= -1.35) -> BUY into fair value & catching upward spike
+        if is_crash and kalman_z >= 1.35 and kalman_fair > 0:
+            target_dist = abs(price - kalman_fair)
+            stop_dist = max(target_dist * 0.55, price * gk_vol * 1.5)
+            stop_dist = max(stop_dist, price * 0.0015)
+            target_dist = max(target_dist, stop_dist * 1.80)
+            return _TradePlan(
+                direction="SELL",
+                archetype="CRASH_DRIFT_EXHAUSTION_SNIPE",
+                target=price - target_dist,
+                target_2=price - target_dist * 1.5,
+                stop=price + stop_dist,
+                win_prob=0.68,
+                horizon_bars=8,
+            )
+        elif is_boom and kalman_z <= -1.35 and kalman_fair > 0:
+            target_dist = abs(price - kalman_fair)
+            stop_dist = max(target_dist * 0.55, price * gk_vol * 1.5)
+            stop_dist = max(stop_dist, price * 0.0015)
+            target_dist = max(target_dist, stop_dist * 1.80)
+            return _TradePlan(
+                direction="BUY",
+                archetype="BOOM_DRIFT_EXHAUSTION_SNIPE",
+                target=price + target_dist,
+                target_2=price + target_dist * 1.5,
+                stop=price - stop_dist,
+                win_prob=0.68,
+                horizon_bars=8,
+            )
+
         return None
 
     @staticmethod
@@ -1293,13 +1344,14 @@ class CalculativeBrain:
 
         plan: Optional[_TradePlan] = None
         if poisson is not None:
-            plan = self._boom_crash_plan(price, sym_upper, poisson)
+            # 1. Boom & Crash Family: strictly Poisson hazard, Hawkes clustering, and spike-direction exhaustion
+            plan = self._boom_crash_plan(price, sym_upper, poisson, kalman.zscore, kalman.fair_value, gk_vol)
+        elif step_analysis is not None:
+            # 2. Step Index Family: strictly discrete Bernoulli runs test and Markov transition scalps
+            plan = self._step_plan(df, price, step_analysis)
         else:
-            if step_analysis is not None:
-                plan = self._step_plan(df, price, step_analysis)
-            # 1. Sovereign Institutional Engine (FFD memory preservation + zero-lag kinetic turning points)
-            if plan is None:
-                plan = self._fractional_kinetic_plan(price, z_ffd, sg_vel, sg_acc, gk_vol, kalman.zscore)
+            # 3. Continuous Volatility Family: FFD kinetics, Kalman fair value, stationary residual O-U, and fractal momentum
+            plan = self._fractional_kinetic_plan(price, z_ffd, sg_vel, sg_acc, gk_vol, kalman.zscore)
             if plan is None and ou.is_reverting and abs(ou.current_zscore) >= self.zscore_thresh:
                 plan = self._ou_plan(price, ou, gk_vol)
             if plan is None and hurst.regime == "PERSISTENT" and entropy.is_ordered:
