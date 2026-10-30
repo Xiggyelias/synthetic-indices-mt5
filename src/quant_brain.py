@@ -1051,6 +1051,24 @@ class CalculativeBrain:
 
     # ── Trade models ──────────────────────────────────────────────────────────
 
+    def _reversion_win_prob(self, price: float, target_dist: float, stop_dist: float, ou: OUParameters) -> float:
+        """
+        P(target before stop) for a trade betting that price returns toward the O-U mean.
+
+        Without significant price-level mean reversion (raw-price Dickey-Fuller test) price
+        is treated as a driftless random walk, and the answer is the gambler's-ruin ratio
+        stop / (target + stop): 1/3 for a 2R target. With evidence, the O-U hitting
+        probability for these exact distances is blended in by the strength of the test.
+        """
+        p_null = stop_dist / (target_dist + stop_dist)
+        if not ou.is_reverting or ou.stationary_std <= 0:
+            return p_null
+        std = ou.stationary_std
+        z0 = abs(price - ou.mu) / std
+        p_model = ou_hit_probability(z0, z0 - target_dist / std, z0 + stop_dist / std)
+        w = evidence_weight(ou.adf_tstat, self.adf_critical, self.adf_critical - 2.0)
+        return float(np.clip(p_null + w * (p_model - p_null), 0.0, 1.0))
+
     def _fractional_kinetic_plan(
         self,
         price: float,
@@ -1059,12 +1077,13 @@ class CalculativeBrain:
         acc: float,
         gk_vol: float,
         kalman_z: float,
+        ou: Optional[OUParameters] = None,
     ) -> Optional[_TradePlan]:
         """
-        Institutional Sovereign Engine:
-        Fuses Marcos López de Prado's memory-preserving Fractional Differencing (FFD)
-        with zero-lag polynomial kinetic velocity & acceleration.
-        Enters on confirmed exhaustion turning points before the next candle forms.
+        Fade a stretched fractionally-differenced series once its Savitzky-Golay
+        acceleration turns. The FFD z-score is stationary by construction, so a large
+        value says nothing about price reverting; the win probability therefore comes
+        from the raw-price O-U test (random walk -> gambler's-ruin probability).
         """
         if abs(z_ffd) < 1.60:
             return None
@@ -1088,7 +1107,13 @@ class CalculativeBrain:
         target_2 = price + stop_dist * 3.2 if direction == "BUY" else price - stop_dist * 3.2
         stop = price - stop_dist if direction == "BUY" else price + stop_dist
 
-        win_prob = float(np.clip(0.68 + 0.12 * math.tanh(abs(z_ffd) - 1.4), 0.65, 0.85))
+        # Only a fade toward the O-U mean can claim reversion odds
+        if ou is not None:
+            toward_mean = (direction == "BUY") == (price < ou.mu)
+            win_prob = self._reversion_win_prob(price, target_dist, stop_dist, ou) if toward_mean \
+                else stop_dist / (target_dist + stop_dist)
+        else:
+            win_prob = 0.68
 
         return _TradePlan(
             direction=direction,
@@ -1118,21 +1143,16 @@ class CalculativeBrain:
         if target_dist <= 0:
             return None
 
-        # Stop loss: set outside 1.8x GK volatility and at least 1.2x stationary std
-        stop_dist = max(std * 1.2, target_dist * 0.75)
-        stop_dist = max(stop_dist, price * gk_vol * 1.8)
+        # Stop loss: set outside market noise (1.8x GK volatility) and at least 1.2x stationary std
+        stop_dist = max(std * 1.2, price * gk_vol * 1.8, price * 0.0020)
         stop_dist = min(stop_dist, price * 0.015)
-        stop_dist = max(stop_dist, price * 0.0010)
 
         target_dist = max(target_dist, stop_dist * 1.60)
         target = price - sign * target_dist
         stop = price + sign * stop_dist
 
-        # Compute probability
-        p_model = ou_hit_probability(abs(z0), 0.0, abs(z0) + 1.4)
-        p_null = stop_dist / (target_dist + stop_dist)
-        w = evidence_weight(ou.adf_tstat, self.adf_critical, self.adf_critical - 2.0)
-        p_final = float(np.clip(p_null + w * (p_model - p_null), 0.0, 0.90))
+        # Priced for the actual target and stop distances, not a fixed 1.4σ stop
+        p_final = self._reversion_win_prob(price, target_dist, stop_dist, ou)
 
         # Reject any setup where win probability is below 55%
         if p_final < 0.55:
@@ -1192,33 +1212,13 @@ class CalculativeBrain:
                 win_prob=drift_hit_probability(round(dist * 1.5, 1), dist, drift, bar_sd),
                 horizon_bars=3,
             )
-
-        # Asset-Specific: Streak Exhaustion (3+ consecutive bars in one direction with decaying continuation)
-        if step.current_streak_length >= 4 and step.streak_continuation_prob <= 0.40 and step.runs_zscore >= 1.28:
-            sign = -1.0 if step.current_streak_direction == "UP" else 1.0
-            return _TradePlan(
-                direction="BUY" if sign > 0 else "SELL",
-                archetype="STEP_STREAK_EXHAUSTION",
-                target=price + sign * round(dist * 1.5, 1),
-                target_2=price + sign * round(dist * 2.0, 1),
-                stop=price - sign * dist,
-                win_prob=float(np.clip(1.0 - step.streak_continuation_prob, 0.58, 0.72)),
-                horizon_bars=3,
-            )
-
+        # No fixed-probability "streak exhaustion" fallback: Step moves ±0.1 with equal
+        # probability, so a streak alone carries no information (runs test above decides).
         return None
 
     @staticmethod
-    def _boom_crash_plan(
-        price: float,
-        sym_upper: str,
-        ph: PoissonHazardResult,
-        kalman_z: float = 0.0,
-        kalman_fair: float = 0.0,
-        gk_vol: float = 0.002,
-    ) -> Optional[_TradePlan]:
+    def _boom_crash_plan(price: float, sym_upper: str, ph: PoissonHazardResult) -> Optional[_TradePlan]:
         is_crash = "CRASH" in sym_upper
-        is_boom = "BOOM" in sym_upper
         drift_sign = 1.0 if is_crash else -1.0  # Crash drifts up, Boom drifts down
         if ph.recommended_side == "CATCH_SPIKE":
             return _TradePlan(
@@ -1230,43 +1230,13 @@ class CalculativeBrain:
                 win_prob=ph.spike_win_prob,
                 horizon_bars=max(3, int(round(ph.spike_stop / max(ph.drift_per_bar, 1e-6)))),
             )
-
-        # Asset-Specific: Asymmetric Drift-Exhaustion Snipe (aligned with Poisson spike direction)
-        # On Crash: upward drift stretch (Z >= +1.35) -> SELL into fair value & catching downward spike
-        # On Boom: downward drift stretch (Z <= -1.35) -> BUY into fair value & catching upward spike
-        if is_crash and kalman_z >= 1.35 and kalman_fair > 0:
-            target_dist = abs(price - kalman_fair)
-            stop_dist = max(target_dist * 0.55, price * gk_vol * 1.5)
-            stop_dist = max(stop_dist, price * 0.0015)
-            target_dist = max(target_dist, stop_dist * 1.80)
-            return _TradePlan(
-                direction="SELL",
-                archetype="CRASH_DRIFT_EXHAUSTION_SNIPE",
-                target=price - target_dist,
-                target_2=price - target_dist * 1.5,
-                stop=price + stop_dist,
-                win_prob=0.68,
-                horizon_bars=8,
-            )
-        elif is_boom and kalman_z <= -1.35 and kalman_fair > 0:
-            target_dist = abs(price - kalman_fair)
-            stop_dist = max(target_dist * 0.55, price * gk_vol * 1.5)
-            stop_dist = max(stop_dist, price * 0.0015)
-            target_dist = max(target_dist, stop_dist * 1.80)
-            return _TradePlan(
-                direction="BUY",
-                archetype="BOOM_DRIFT_EXHAUSTION_SNIPE",
-                target=price + target_dist,
-                target_2=price + target_dist * 1.5,
-                stop=price - stop_dist,
-                win_prob=0.68,
-                horizon_bars=8,
-            )
-
+        # No fixed-probability "drift exhaustion" snipe: Deriv documents Boom/Crash spikes as
+        # memoryless, so a stretched drift does not make a spike more likely. Spike bets are
+        # priced only by the Poisson/Hawkes model above.
         return None
 
-    @staticmethod
-    def _kalman_plan(price: float, kalman: KalmanFilterResult, gk_vol: float) -> Optional[_TradePlan]:
+    def _kalman_plan(self, price: float, kalman: KalmanFilterResult, gk_vol: float,
+                     ou: OUParameters) -> Optional[_TradePlan]:
         z = kalman.zscore
         if abs(z) < 1.7:
             return None
@@ -1284,7 +1254,11 @@ class CalculativeBrain:
         target_dist = max(raw_target * 1.35, stop_dist * 1.80)
         target = price - target_dist if direction == "SELL" else price + target_dist
         target_2 = price - target_dist * 1.6 if direction == "SELL" else price + target_dist * 1.6
-        win_prob = float(np.clip(0.66 + 0.12 * math.tanh(abs(z) - 1.5), 0.64, 0.85))
+        # The Kalman fair value follows price, so a large residual is not evidence that price
+        # will return to it; the odds come from the raw-price O-U test.
+        toward_mean = (direction == "BUY") == (price < ou.mu)
+        win_prob = self._reversion_win_prob(price, target_dist, stop_dist, ou) if toward_mean \
+            else stop_dist / (target_dist + stop_dist)
         return _TradePlan(
             direction=direction,
             archetype="KALMAN_FAIR_VALUE_REVERSION",
@@ -1333,7 +1307,10 @@ class CalculativeBrain:
             min_r_squared=self.hurst_min_r2,
         )
         kalman = fit_kalman_filter(close, process_noise=self.kalman_q, measurement_noise=self.kalman_r)
-        ou = fit_ornstein_uhlenbeck(close, adf_critical=self.adf_critical, residuals=kalman.residuals, fair_value=kalman.fair_value)
+        # Stationarity is tested on price itself. Price minus its Kalman (or any moving)
+        # average is stationary even for a pure random walk, so testing those residuals
+        # declares every market "mean-reverting" while price never reverts.
+        ou = fit_ornstein_uhlenbeck(close, adf_critical=self.adf_critical)
         gk_vol = compute_garman_klass_volatility(df, window=min(self.gk_window, len(df)))
         entropy = compute_shannon_entropy(close, window=min(30, len(df) - 1), order_threshold=self.entropy_thresh)
         poisson = compute_poisson_hazard(df, symbol, k_horizon=self.poisson_horizon)
@@ -1345,19 +1322,19 @@ class CalculativeBrain:
         plan: Optional[_TradePlan] = None
         if poisson is not None:
             # 1. Boom & Crash Family: strictly Poisson hazard, Hawkes clustering, and spike-direction exhaustion
-            plan = self._boom_crash_plan(price, sym_upper, poisson, kalman.zscore, kalman.fair_value, gk_vol)
+            plan = self._boom_crash_plan(price, sym_upper, poisson)
         elif step_analysis is not None:
             # 2. Step Index Family: strictly discrete Bernoulli runs test and Markov transition scalps
             plan = self._step_plan(df, price, step_analysis)
         else:
             # 3. Continuous Volatility Family: FFD kinetics, Kalman fair value, stationary residual O-U, and fractal momentum
-            plan = self._fractional_kinetic_plan(price, z_ffd, sg_vel, sg_acc, gk_vol, kalman.zscore)
+            plan = self._fractional_kinetic_plan(price, z_ffd, sg_vel, sg_acc, gk_vol, kalman.zscore, ou)
             if plan is None and ou.is_reverting and abs(ou.current_zscore) >= self.zscore_thresh:
                 plan = self._ou_plan(price, ou, gk_vol)
             if plan is None and hurst.regime == "PERSISTENT" and entropy.is_ordered:
                 plan = self._momentum_plan(df, price, gk_vol)
             if plan is None and abs(kalman.zscore) >= 1.60:
-                plan = self._kalman_plan(price, kalman, gk_vol)
+                plan = self._kalman_plan(price, kalman, gk_vol, ou)
 
         confluence = compute_multi_scale_confluence(df, factor=3, direction=plan.direction if plan else None)
 

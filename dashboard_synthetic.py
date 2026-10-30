@@ -809,7 +809,7 @@ is_bot_running, bot_pid = get_cached_bot_status()
 stop_flag = ROOT / "data" / "engine_manual_stop.flag"
 
 # Auto-start 24/7 autonomous bot if enabled and NOT manually stopped
-if not is_bot_running and not stop_flag.exists() and not st.session_state.get("manual_engine_stopped", False) and os.getenv("AUTONOMOUS_AUTOSTART", "true").lower() == "true":
+if not is_bot_running and not stop_flag.exists() and not st.session_state.get("manual_engine_stopped", False) and os.getenv("AUTONOMOUS_AUTOSTART", "false").lower() == "true":
     bot_pid = launch_autonomous_bot()
     is_bot_running = bot_pid is not None
 

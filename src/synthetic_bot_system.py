@@ -264,6 +264,33 @@ class SyntheticBotSystem:
                              analysis.strategy_archetype, analysis.expected_yield_r, self.strategy.last_rejection)
         return sig
 
+    DUPLICATE_WINDOW_SECONDS = 120
+    DEMO_TRADE_MODES = (0, 1)   # MT5 ACCOUNT_TRADE_MODE_DEMO, ACCOUNT_TRADE_MODE_CONTEST
+
+    def _live_trading_blocked(self) -> str:
+        """Real-money accounts trade only with ALLOW_LIVE_TRADING=true; returns the reason when blocked."""
+        account = self.conn.get_account_info() if hasattr(self.conn, "get_account_info") else None
+        mode = getattr(account, "trade_mode", None)
+        if mode is None or int(mode) in self.DEMO_TRADE_MODES:
+            return ""
+        if os.getenv("ALLOW_LIVE_TRADING", "false").strip().lower() == "true":
+            return ""
+        return ("account is a REAL-money account and ALLOW_LIVE_TRADING is not 'true' "
+                "(observe-only; set ALLOW_LIVE_TRADING=true in .env to trade real money)")
+
+    def _recent_broker_position(self, symbol: str, server_now: float) -> bool:
+        """
+        Broker-side duplicate check. Local state cannot see orders sent by another process
+        or a lost response; MT5's own position list can.
+        """
+        if not hasattr(self.conn, "get_positions") or server_now <= 0:
+            return False
+        for p in self.conn.get_positions(symbol) or []:
+            if int(getattr(p, "magic", -1)) == int(self.config.magic) and \
+                    server_now - float(getattr(p, "time", 0) or 0) < self.DUPLICATE_WINDOW_SECONDS:
+                return True
+        return False
+
     def execute_signal(self, sig: SyntheticSignal) -> bool:
         """Place the trade in MT5 with the Kelly-sized volume."""
         max_trades = min(3, self.config.max_open_trades)
@@ -282,9 +309,19 @@ class SyntheticBotSystem:
         if sig.sizing is None or sig.sizing.volume <= 0:
             return False
 
+        blocked = self._live_trading_blocked()
+        if blocked:
+            self.logger.warning("Signal NOT executed (%s %s %s): %s", sig.symbol, sig.direction, sig.strategy_type, blocked)
+            return False
+
         price_info = self.conn.get_symbol_price(sig.symbol)
         if not price_info:
             self.logger.error("Could not obtain live price for %s", sig.symbol)
+            return False
+
+        if self._recent_broker_position(sig.symbol, float(getattr(price_info, "time", 0) or 0)):
+            self.logger.warning("Duplicate guard: MT5 already holds a %s position (magic %d) opened in the last %ds; skipping",
+                                sig.symbol, self.config.magic, self.DUPLICATE_WINDOW_SECONDS)
             return False
 
         entry = float(price_info.ask if sig.direction == "BUY" else price_info.bid)

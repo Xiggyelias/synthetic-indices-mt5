@@ -65,6 +65,28 @@ class SizingResult:
     rejection_reason: str = ""
 
 
+def value_per_price_unit(broker_rules: Optional[Any]) -> float:
+    """
+    Account-currency P&L of 1 lot for a 1.0 move in price.
+
+    Deriv's MT5 tick values are not reliable for this: Volatility 75 Index reports
+    tick_value 0.0001 per 0.01 tick (implying $0.01 per point per lot), while real fills
+    on 2026-10-29/30 settled at $1.00 per point per lot on every synthetic. Trusting it
+    understated V75 risk 100x. Order of preference:
+      1. `value_per_price_unit` measured by the broker (MT5 order_calc_profit)
+      2. the larger of contract size and tick_value / tick_size (never the smaller)
+      3. 1.0
+    """
+    measured = float(getattr(broker_rules, "value_per_price_unit", 0.0) or 0.0)
+    if measured > 0:
+        return measured
+    tick_size = float(getattr(broker_rules, "tick_size", 0.0) or 0.0)
+    tick_value = float(getattr(broker_rules, "tick_value", 0.0) or 0.0)
+    contract = float(getattr(broker_rules, "contract_size", 0.0) or 0.0)
+    candidates = [v for v in (contract, tick_value / tick_size if tick_size > 0 else 0.0) if v > 0]
+    return max(candidates) if candidates else 1.0
+
+
 def _rejected(reason: str) -> SizingResult:
     return SizingResult(0.0, 0.0, 0.0, 0.0, False, reason)
 
@@ -253,10 +275,7 @@ class SyntheticRiskManager:
         if target_risk <= 0.0:
             return _rejected("Risk scaled to zero")
 
-        tick_size = float(getattr(broker_rules, "tick_size", 0.0) or 0.0)
-        tick_value = float(getattr(broker_rules, "tick_value", 0.0) or 0.0)
-        value_per_price_unit = tick_value / tick_size if tick_size > 0 and tick_value > 0 else 1.0
-        risk_per_lot = price_risk * value_per_price_unit
+        risk_per_lot = price_risk * value_per_price_unit(broker_rules)
 
         min_vol, max_vol, _ = self.volume_limits(symbol, broker_rules)
         raw_vol = account_balance * target_risk / risk_per_lot
@@ -266,8 +285,8 @@ class SyntheticRiskManager:
         volume = self.normalize_volume(symbol, raw_vol, broker_rules)
         actual_risk = volume * risk_per_lot
         # Clamping up to the broker's minimum lot can multiply the intended risk;
-        # on micro accounts (<= $50), allow a buffer (up to 1.8x cap) for broker minimum lots
-        # while strictly refusing catastrophic exposures (>12% / 40%).
+        # on micro accounts (<= $50), allow a buffer (up to 2.5x cap) for broker minimum lots
+        # strictly on verified micro instruments (Vol 75 1s, Boom 300) clamped <= $1.35 USD.
         micro_dollar_pass = (account_balance <= 15.0 and volume <= min_vol * 1.0001 and actual_risk <= 1.35)
         risk_cap = (
             self.max_risk_pct * 2.5

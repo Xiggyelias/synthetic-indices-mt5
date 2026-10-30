@@ -63,6 +63,8 @@ class BrokerRules:
     tick_size: float = 0.0
     tick_value: float = 0.0
     freeze_level_points: int = 0
+    contract_size: float = 0.0
+    value_per_price_unit: float = 0.0   # measured with order_calc_profit; 0 when unavailable
 
 
 # --- Timeframe mapping helpers ---
@@ -719,7 +721,21 @@ class MT5Connection:
             tick_size=float(getattr(info, "trade_tick_size", 0.0) or 0.0),
             tick_value=float(getattr(info, "trade_tick_value", 0.0) or 0.0),
             freeze_level_points=int(getattr(info, "trade_freeze_level", 0) or 0),
+            contract_size=float(getattr(info, "trade_contract_size", 0.0) or 0.0),
+            value_per_price_unit=self._measured_value_per_price_unit(symbol, info),
         )
+
+    @staticmethod
+    def _measured_value_per_price_unit(symbol: str, info: Any) -> float:
+        """Broker-computed P&L of 1 lot for a 1.0 price move (0 when MT5 cannot compute it)."""
+        try:
+            price = float(getattr(info, "ask", 0.0) or getattr(info, "bid", 0.0) or 0.0)
+            if price <= 0:
+                return 0.0
+            profit = mt5.order_calc_profit(mt5.ORDER_TYPE_BUY, symbol, 1.0, price, price + 1.0)
+            return abs(float(profit)) if profit else 0.0
+        except Exception:
+            return 0.0
 
     def normalize_volume(self, symbol: str, requested_volume: float) -> Optional[float]:
         rules = self.get_broker_rules(symbol)
@@ -729,10 +745,14 @@ class MT5Connection:
         # align to step
         steps = math.floor((clipped - rules.volume_min) / rules.volume_step + 1e-9)
         normalized = rules.volume_min + steps * rules.volume_step
-        normalized = round(normalized, 2)
+        # Round to the step's precision: rounding to 2 decimals turned 0.015 into 0.01 on
+        # 0.001-step symbols, so the filled size differed from the sized one.
+        decimals = max(0, -int(math.floor(math.log10(rules.volume_step)))) if rules.volume_step > 0 else 2
+        normalized = round(normalized, decimals + 1)
+        normalized = round(normalized, decimals)
         if normalized != requested_volume:
             self.logger.info(
-                "Adjusted volume for %s from %.2f to %.2f (min=%.2f max=%.2f step=%.2f)",
+                "Adjusted volume for %s from %.3f to %.3f (min=%.3f max=%.2f step=%.3f)",
                 symbol,
                 requested_volume,
                 normalized,
@@ -858,7 +878,7 @@ class MT5Connection:
         self.logger.critical(
             "═══════════════════════════════════════════════════════════════════════════════════════\n"
             "🟢 SEND_MARKET_ORDER 🟢\n"
-            "   Symbol: %s | Type: %s | Volume: %.2f | Price: %.5f\n"
+            "   Symbol: %s | Type: %s | Volume: %.3f | Price: %.5f\n"
             "   SL: %.5f | TP: %.5f | Magic: %d | Deviation: %d | Filling: %d\n"
             "   Comment: %s\n"
             "═══════════════════════════════════════════════════════════════════════════════════════",
@@ -912,7 +932,7 @@ class MT5Connection:
                 )
                 return None
 
-            self.logger.info("[MT5_ORDER_SEND] Attempt %d: filling_mode=%d | symbol=%s | %s %.2f",
+            self.logger.info("[MT5_ORDER_SEND] Attempt %d: filling_mode=%d | symbol=%s | %s %.3f",
                            mode_attempt + 1, mode, symbol, order_type.upper(), normalized_volume)
 
             result = mt5.order_send(request)
@@ -996,7 +1016,7 @@ class MT5Connection:
             if retcode == mt5.TRADE_RETCODE_DONE:
                 self.last_order_error = {}
                 self.logger.critical(
-                    "✅ ORDER_EXECUTED: %s %.2f %s at %.5f | ticket=%d | deal=%d",
+                    "✅ ORDER_EXECUTED: %s %.3f %s at %.5f | ticket=%d | deal=%d",
                     order_type.upper(),
                     normalized_volume,
                     symbol,

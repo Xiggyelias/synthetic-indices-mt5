@@ -41,6 +41,7 @@ from mt5_connection import MT5Connection, MT5Credentials
 from quant_brain import CalculativeBrain
 from synthetic_bot_system import SyntheticBotConfig, SyntheticBotSystem, resolve_symbol
 from synthetic_calibration import ProbabilityCalibrator
+from instance_lock import acquire_instance_lock, release_instance_lock
 from synthetic_strategy import var_risk_level
 
 
@@ -421,22 +422,10 @@ def run_cloud_surveillance_loop(cfg: SyntheticBotConfig, logger: logging.Logger)
 
     # Guard against multiple engine instances running concurrently
     pid_file = ROOT / "data" / "synthetic_bot.pid"
-    pid_file.parent.mkdir(parents=True, exist_ok=True)
-    if pid_file.exists():
-        try:
-            old_pid = int(pid_file.read_text(encoding="utf-8").strip())
-            if old_pid != os.getpid() and psutil.pid_exists(old_pid):
-                try:
-                    old_proc = psutil.Process(old_pid)
-                    old_cmd = " ".join(old_proc.cmdline()).lower()
-                    if "synthetic_bot.py" in old_cmd:
-                        logger.warning("⚠️ Another QUANTA-SYNTH instance (PID %d) is already active. Exiting duplicate process.", old_pid)
-                        return 0
-                except (psutil.NoSuchProcess, psutil.AccessDenied):
-                    pass
-        except Exception:
-            pass
-
+    instance_lock = acquire_instance_lock(ROOT / "data" / "synthetic_bot.lock")
+    if instance_lock is None:
+        logger.warning("⚠️ Another QUANTA-SYNTH engine holds the instance lock. Exiting duplicate process.")
+        return 0
     pid_file.write_text(str(os.getpid()), encoding="utf-8")
 
     storage = TradeStorageManager(state_file=state_path)
@@ -709,6 +698,7 @@ def run_cloud_surveillance_loop(cfg: SyntheticBotConfig, logger: logging.Logger)
         logger.info("Cloud surveillance engine stopped cleanly.")
     finally:
         pid_file.unlink(missing_ok=True)
+        release_instance_lock(instance_lock)
     return 0
 
 
@@ -719,22 +709,10 @@ def cmd_run() -> int:
 
     import psutil
     pid_file = ROOT / "data" / "synthetic_bot.pid"
-    pid_file.parent.mkdir(parents=True, exist_ok=True)
-    if pid_file.exists():
-        try:
-            old_pid = int(pid_file.read_text(encoding="utf-8").strip())
-            if old_pid != os.getpid() and psutil.pid_exists(old_pid):
-                try:
-                    old_proc = psutil.Process(old_pid)
-                    old_cmd = " ".join(old_proc.cmdline()).lower()
-                    if "synthetic_bot.py" in old_cmd:
-                        logger.warning("⚠️ Another QUANTA-SYNTH instance (PID %d) is already active. Exiting duplicate process.", old_pid)
-                        return 0
-                except (psutil.NoSuchProcess, psutil.AccessDenied):
-                    pass
-        except Exception:
-            pass
-
+    instance_lock = acquire_instance_lock(ROOT / "data" / "synthetic_bot.lock")
+    if instance_lock is None:
+        logger.warning("⚠️ Another QUANTA-SYNTH engine holds the instance lock. Exiting duplicate process.")
+        return 0
     pid_file.write_text(str(os.getpid()), encoding="utf-8")
 
     logger.info("Initializing QUANTA-SYNTH Autonomous Engine...")
@@ -757,12 +735,14 @@ def cmd_run() -> int:
         finally:
             conn.shutdown()
             pid_file.unlink(missing_ok=True)
+            release_instance_lock(instance_lock)
             logger.info("MT5 connection closed.")
         return 0
 
     logger.warning("MT5 desktop terminal not found on this host (Linux container / cloud environment).")
     logger.info("⚡ Starting 24/7 CLOUD QUANTITATIVE SURVEILLANCE & PAPER TRADING ENGINE.")
     logger.info("Calculative Brain will continuously scan all 14 markets, compute fractional Kelly sizes, and dispatch alerts to Telegram.")
+    release_instance_lock(instance_lock)  # the cloud loop takes the lock itself
     return run_cloud_surveillance_loop(cfg, logger)
 
 
