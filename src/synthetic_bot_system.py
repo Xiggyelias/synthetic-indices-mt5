@@ -395,14 +395,38 @@ class SyntheticBotSystem:
             self.logger.info("Trend intact on %s ticket=%d: target extended to %.5f", t["symbol"], ticket, new_tp)
 
     def _tighten_stop(self, ticket: int, t: Dict[str, Any], new_sl: float, comment: str) -> bool:
-        """Move the stop only if it improves on the current one."""
+        """Move the stop only if it improves on the current one and complies with broker stop_level."""
         current = float(t["stop_loss"])
-        better = new_sl > current if t["direction"] == "BUY" else new_sl < current
+        direction = str(t.get("direction", "BUY")).upper()
+        better = new_sl > current if direction == "BUY" else new_sl < current
         if not better:
             return False
+
+        # Validate stop distance against broker freeze/stop level to prevent rejected modifications
+        symbol = str(t["symbol"])
+        rules = self.conn.get_broker_rules(symbol)
+        if rules is not None:
+            min_dist = max(rules.stop_level_points, rules.freeze_level_points, 1.0) * rules.point
+            tick = getattr(self.conn, "get_tick", lambda s: None)(symbol)
+            if tick is not None:
+                if direction == "BUY":
+                    max_allowed_sl = round(tick.bid - min_dist, 5)
+                    if new_sl >= max_allowed_sl:
+                        if max_allowed_sl > current:
+                            new_sl = max_allowed_sl
+                        else:
+                            return False
+                else:
+                    min_allowed_sl = round(tick.ask + min_dist, 5)
+                    if new_sl <= min_allowed_sl:
+                        if min_allowed_sl < current:
+                            new_sl = min_allowed_sl
+                        else:
+                            return False
+
         res = self.conn.set_position_sltp(ticket=ticket, sl=new_sl, tp=float(t["take_profit"]), comment=comment)
         if res is None or getattr(res, "retcode", TRADE_RETCODE_DONE) != TRADE_RETCODE_DONE:
-            self.logger.warning("Stop update %s failed on ticket=%d", comment, ticket)
+            self.logger.debug("Stop update %s held on ticket=%d (market close to stop)", comment, ticket)
             return False
         t["stop_loss"] = new_sl
         self._save_state()

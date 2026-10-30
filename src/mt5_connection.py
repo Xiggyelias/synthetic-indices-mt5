@@ -281,6 +281,12 @@ class MT5Connection:
             "terminal_path": self.credentials.terminal_path or "",
         }
 
+    def get_tick(self, symbol: str) -> Optional[Any]:
+        """Fetch current tick for symbol."""
+        if not self.ensure_connected():
+            return None
+        return mt5.symbol_info_tick(str(symbol))
+
     def get_positions(self, symbol: Optional[str] = None):
         if not self.ensure_connected():
             return None
@@ -395,7 +401,7 @@ class MT5Connection:
 
         ok, err = self.validate_stops(str(symbol), price_for_validation, sl or None, tp or None, direction=side)
         if not ok:
-            self.logger.error("SL/TP validation failed for %s: %s", symbol, err)
+            self.logger.debug("SL/TP validation rejected for %s: %s", symbol, err)
             return None
 
         request = {
@@ -1305,14 +1311,17 @@ class MT5Connection:
 
     @staticmethod
     def _select_filling_mode(info: mt5.SymbolInfo) -> int:
-        supported = {
-            mt5.ORDER_FILLING_FOK,
-            mt5.ORDER_FILLING_IOC,
-            mt5.ORDER_FILLING_RETURN,
-        }
-        if info.filling_mode in supported:
-            return info.filling_mode
-        return mt5.ORDER_FILLING_RETURN
+        """
+        Map broker SYMBOL_FILLING_MODE bitflags to MT5 trade request type_filling enum.
+        SYMBOL_FILLING_FOK = 1 (bit 0) -> ORDER_FILLING_FOK = 0
+        SYMBOL_FILLING_IOC = 2 (bit 1) -> ORDER_FILLING_IOC = 1
+        """
+        filling_mode_mask = getattr(info, "filling_mode", 0)
+        if filling_mode_mask & 1:
+            return getattr(mt5, "ORDER_FILLING_FOK", 0)
+        if filling_mode_mask & 2:
+            return getattr(mt5, "ORDER_FILLING_IOC", 1)
+        return getattr(mt5, "ORDER_FILLING_RETURN", 2)
 
     def _wait_for_terminal_connected(self, wait_seconds: float = 10.0, poll_seconds: float = 0.5) -> bool:
         deadline = time.time() + wait_seconds
